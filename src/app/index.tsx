@@ -1,17 +1,46 @@
-import { Text, View, StyleSheet } from "react-native";
+import { useRouter } from 'expo-router';
+import { Pressable, Text, View } from 'react-native';
 
-export default function Index() {
+export default function HomeScreen() {
+  const router = useRouter();
+
   return (
-    <View style={styles.container}>
-      <Text>Edit src/app/index.tsx to edit this screen.</Text>
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+      <Text>Home Screen</Text>
+
+      <Pressable
+        onPress={() => router.push('/playpage')}
+        style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
+        <Text style={styles.buttonText}>Gehe zu Play Page</Text>
+      </Pressable>
+      <Pressable
+        onPress={() => router.push('/editpage')}
+        style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
+        <Text style={styles.buttonText}>Gehe zu Edit Page</Text>
+      </Pressable>
+      <Pressable
+        onPress={() => router.push('/notenpage')}
+        style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
+        <Text style={styles.buttonText}>Gehe zu Noten Page</Text>
+      </Pressable>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
+const styles = {
+  button: {
+    minWidth: 180,
+    marginTop: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#2563eb',
   },
-});
+  buttonPressed: {
+    opacity: 0.7,
+  },
+  buttonText: {
+    color: '#ffffff',
+    textAlign: 'center' as const,
+  },
+};
