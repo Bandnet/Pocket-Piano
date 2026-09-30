@@ -11,17 +11,7 @@ export default function HomeScreen() {
       <Pressable
         onPress={() => router.push('/playpage')}
         style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
-        <Text style={styles.buttonText}>Gehe zu Play Page</Text>
-      </Pressable>
-      <Pressable
-        onPress={() => router.push('/editpage')}
-        style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
-        <Text style={styles.buttonText}>Gehe zu Edit Page</Text>
-      </Pressable>
-      <Pressable
-        onPress={() => router.push('/notenpage')}
-        style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
-        <Text style={styles.buttonText}>Gehe zu Noten Page</Text>
+        <Text style={styles.buttonText}>Start</Text>
       </Pressable>
     </View>
   );
