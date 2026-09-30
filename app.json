@@ -37,6 +37,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "0607ffaf-a75d-4a1f-8a73-3667f11509f1"
+      }
+    },
+    "owner": "andrebernets-team"
   }
 }
