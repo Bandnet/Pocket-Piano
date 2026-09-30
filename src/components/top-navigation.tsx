@@ -3,6 +3,7 @@ import { Pressable, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 const navigationItems = [
+  { label: 'Home', route: '/' },
   { label: 'Play', route: '/playpage' },
   { label: 'Edit', route: '/editpage' },
   { label: 'Noten', route: '/notenpage' },
@@ -36,6 +37,7 @@ const styles = {
   navigationContent: {
     flexDirection: 'row' as const,
     justifyContent: 'space-around' as const,
+    alignItems: 'center' as const,
     paddingHorizontal: 8,
     paddingVertical: 12,
     borderBottomWidth: 1,
