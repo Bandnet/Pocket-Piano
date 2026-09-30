@@ -1,12 +1,45 @@
+import Ionicons from '@expo/vector-icons/Ionicons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
-import { Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { Alert, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+
+const PROJECTS_STORAGE_KEY = '@pocket-piano/projects';
 
 export default function HomeScreen() {
   const router = useRouter();
   const [projectName, setProjectName] = useState('');
   const [projects, setProjects] = useState<string[]>([]);
   const [isModalVisible, setIsModalVisible] = useState(false);
+  const [hasLoadedProjects, setHasLoadedProjects] = useState(false);
+
+  useEffect(() => {
+    async function loadProjects() {
+      try {
+        const storedProjects = await AsyncStorage.getItem(PROJECTS_STORAGE_KEY);
+
+        if (storedProjects) {
+          setProjects(JSON.parse(storedProjects));
+        }
+      } catch {
+        Alert.alert('Could not load projects', 'Your saved projects could not be loaded.');
+      } finally {
+        setHasLoadedProjects(true);
+      }
+    }
+
+    loadProjects();
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedProjects) {
+      return;
+    }
+
+    AsyncStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects)).catch(() => {
+      Alert.alert('Could not save project', 'Your project changes could not be saved.');
+    });
+  }, [hasLoadedProjects, projects]);
 
   function addProject() {
     const name = projectName.trim();
@@ -18,6 +51,21 @@ export default function HomeScreen() {
     setProjects((currentProjects) => [...currentProjects, name]);
     setProjectName('');
     setIsModalVisible(false);
+  }
+
+  function confirmDeleteProject(project: string) {
+    Alert.alert(
+      'Delete project?',
+      `Deleting "${project}" cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => setProjects((currentProjects) => currentProjects.filter((item) => item !== project)),
+        },
+      ],
+    );
   }
 
   return (
@@ -36,13 +84,21 @@ export default function HomeScreen() {
         ) : (
           <View style={styles.projectList}>
             {projects.map((project) => (
-              <Pressable
-                key={project}
-                onPress={() => router.push('/playpage')}
-                style={({ pressed }) => [styles.project, pressed && styles.projectPressed]}>
-                <Text style={styles.projectText}>{project}</Text>
-                <Text style={styles.projectHint}>Open</Text>
-              </Pressable>
+              <View key={project} style={styles.project}>
+                <Pressable
+                  onPress={() => router.push('/playpage')}
+                  style={({ pressed }) => [styles.projectOpen, pressed && styles.projectPressed]}>
+                  <Text style={styles.projectText}>{project}</Text>
+                  <Text style={styles.projectHint}>Open</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityLabel={`Delete ${project}`}
+                  accessibilityRole="button"
+                  onPress={() => confirmDeleteProject(project)}
+                  style={({ pressed }) => [styles.deleteButton, pressed && styles.buttonPressed]}>
+                  <Ionicons name="trash-outline" size={18} color="#dc2626" />
+                </Pressable>
+              </View>
             ))}
           </View>
         )}
@@ -133,13 +189,16 @@ const styles = {
   project: {
     width: '48%' as const,
     minHeight: 120,
-    justifyContent: 'space-between' as const,
     marginBottom: 14,
-    padding: 16,
     borderWidth: 1,
     borderColor: '#d1d5db',
     borderRadius: 8,
     backgroundColor: '#ffffff',
+  },
+  projectOpen: {
+    minHeight: 88,
+    justifyContent: 'space-between' as const,
+    padding: 16,
   },
   projectPressed: {
     backgroundColor: '#eff6ff',
@@ -152,6 +211,14 @@ const styles = {
   projectHint: {
     color: '#6b7280',
     fontSize: 12,
+  },
+  deleteButton: {
+    minHeight: 38,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
   },
   fab: {
     position: 'absolute' as const,
