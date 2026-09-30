@@ -1,56 +1,38 @@
-# Welcome to your Expo app 👋
+# Pocket Piano 🎹
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+**Pocket Piano** ist ein virtuelles Piano und ein mobile Musik-Editor für unterwegs[cite: 1]. Es ermöglicht Musik-Begeisterten, musikalische Ideen jederzeit spontan einzuspielen, aufzunehmen, im Detail zu bearbeiten und als Noten anzuzeigen[cite: 1].
 
-## Get started
+---
 
-1. Install dependencies
+## 🌟 Hauptfunktionen (MVP)
 
-   ```bash
-   npm install
-   ```
+* **Virtuelles Piano:** 
+  * Interaktives Klavier zum Einspielen von Melodien[cite: 1].
+  * **Oktavwechsel per Bewegung:** Durch Neigen des Smartphones lässt sich der Oktavbereich flexibel verschieben[cite: 1].
+* **Aufnahme & Wiedergabe:** Melodien direkt in der App aufnehmen und wieder abspielen[cite: 1].
+* **Piano-Roll-Editor:** 
+  * Gespeicherte Songs im Editor bearbeiten[cite: 1].
+  * Töne manuell hinzufügen (`+ ADD NOTE`), Rückgängig machen (`UNDO`) und Lautstärke/Anschlagsdynamik (`Velocity`) anpassen[cite: 1].
+* **Notenansicht & Export:** 
+  * Eingespielte Stücke als Notenblatt anzeigen lassen[cite: 1].
+  * Export-Funktion als PDF[cite: 1].
 
-2. Start the app
+---
 
-   ```bash
-   npx expo start
-   ```
+## 🎯 Zielgruppe
 
-In the output, you'll find options to open the app in a
+Das Projekt richtet sich an **Musik-Anfängerinnen und -Anfänger** sowie **Hobby-Pianistinnen und -Pianisten** (insbesondere Jugendliche), die unterwegs kreative Ideen festhalten möchten – auch wenn gerade kein echtes Klavier in der Nähe ist[cite: 1].
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+---
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+## 🔮 Geplante Features (Roadmap)
 
-## Get a fresh project
+* **Audio-Erkennung via Mikrofon:** Töne eines echten Pianos über das Mikrofon erkennen und verarbeiten[cite: 1].
+* **Erweiterte Instrumente & Exportoptionen:** Zukünftige Erweiterung des Funktionsumfangs[cite: 1].
 
-When you're ready, run:
+---
 
-```bash
-npm run reset-project
-```
+## 💰 Preismodell & Distribution
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
-
-### Other setup steps
-
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+* **Freemium:** Die Grundfunktionen sind kostenlos nutzbar[cite: 1]. Zusätzliche Instrumente oder erweiterte Exportfunktionen können zu einem späteren Zeitpunkt kostenpflichtig angeboten werden[cite: 1].
+* **Plattform:** Verfügbar für Android im **Google Play Store**[cite: 1].
