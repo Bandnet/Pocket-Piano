@@ -86,7 +86,7 @@ export default function HomeScreen() {
             {projects.map((project) => (
               <View key={project} style={styles.project}>
                 <Pressable
-                  onPress={() => router.push('/playpage')}
+                  onPress={() => router.push({ pathname: '/playpage', params: { project } })}
                   style={({ pressed }) => [styles.projectOpen, pressed && styles.projectPressed]}>
                   <Text style={styles.projectText}>{project}</Text>
                   <Text style={styles.projectHint}>Open</Text>
