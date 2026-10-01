@@ -3,7 +3,8 @@ import { TempoControl } from '@/components/tempo-control';
 import { DEFAULT_BPM, normalizeBpm, playbackScale } from '@/constants/tempo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AudioPlayer, createAudioPlayer } from 'expo-audio';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
 import {
   Modal,
   PanResponder,
@@ -31,6 +32,7 @@ const HIGHEST_MIDI = 108; // C8
 const MAX_PLAYERS = 12; // keep the same value as on the play page (Android limits how many players can exist)
 const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const blackNoteNames = new Set(['C#', 'D#', 'F#', 'G#', 'A#']);
+const RELEASE_MS = 5000; // the sound keeps fading for this long after the end of a note
 
 function midiToName(midi: number) {
   return `${noteNames[midi % 12]}${Math.floor(midi / 12) - 1}`;
@@ -100,6 +102,7 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [addMenu, setAddMenu] = useState<{ note: string; at: number } | null>(null);
   const players = useRef(new Map<number, AudioPlayer>()); // sample midi -> player, least recently used first
+  const playbackVoices = useRef(new Map<string, AudioPlayer>());
   const lastPlayed = useRef<Record<number, string>>({}); // sample midi -> id of the note that last started on it
   const playbackTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const playheadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -160,15 +163,21 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
     };
   }, [projectName]);
 
-  useEffect(() => {
-    const activePlayers = players.current;
-    return () => {
-      if (playheadTimer.current) clearTimeout(playheadTimer.current);
-      playbackTimers.current.forEach((timer) => clearTimeout(timer));
-      activePlayers.forEach((player) => player.remove());
-      activePlayers.clear();
-    };
-  }, []);
+  function releaseAudioPlayers() {
+    if (playheadTimer.current) clearTimeout(playheadTimer.current);
+    playheadTimer.current = null;
+    playbackTimers.current.forEach((timer) => clearTimeout(timer));
+    playbackTimers.current = [];
+    players.current.forEach((player) => player.remove());
+    players.current.clear();
+    playbackVoices.current.forEach((player) => player.remove());
+    playbackVoices.current.clear();
+    setIsPlaying(false);
+  }
+
+  // The Play page remains mounted underneath this route, so release editor
+  // players whenever the editor loses focus to avoid exceeding native limits.
+  useFocusEffect(useCallback(() => releaseAudioPlayers, []));
 
   useEffect(() => {
     const anchor = zoomAnchor.current;
@@ -241,7 +250,32 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
     playbackTimers.current.forEach((timer) => clearTimeout(timer));
     playbackTimers.current = [];
     players.current.forEach((player) => player.pause());
+    playbackVoices.current.forEach((player) => player.remove());
+    playbackVoices.current.clear();
     setIsPlaying(false);
+  }
+
+  function startPlaybackVoice(noteName: string, id: string) {
+    const midi = noteNameToMidi(noteName);
+    if (Number.isNaN(midi)) return;
+    const sampleMidi = sampleMidiFor(midi);
+    try {
+      const player = createAudioPlayer(getSampleUrl(sampleMidi), { downloadFirst: Platform.OS !== 'web' });
+      player.shouldCorrectPitch = false;
+      player.setPlaybackRate(2 ** ((midi - sampleMidi) / 12));
+      playbackVoices.current.set(id, player);
+      player.play();
+    } catch (error) {
+      console.warn(`Could not create playback voice for ${noteName}`, error);
+    }
+  }
+
+  function endPlaybackVoice(_noteName: string, id: string) {
+    const player = playbackVoices.current.get(id);
+    if (!player) return;
+    player.pause();
+    player.remove();
+    playbackVoices.current.delete(id);
   }
 
   function playRecording() {
@@ -251,15 +285,11 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
     const scale = playbackScale(bpm);
     const startedAt = Date.now() - startAt * scale;
 
-    // load the samples in advance (as many as the player limit allows, the rest load when needed)
-    const samples = new Set(notes.filter((item) => item.at >= startAt).map((item) => sampleMidiFor(noteNameToMidi(item.note))));
-    [...samples].slice(0, MAX_PLAYERS).forEach(getPlayer);
-
     notes.forEach((item, index) => {
       if (item.at < startAt) return;
-      playbackTimers.current.push(setTimeout(() => startNote(item.note, item.id), (item.at - startAt) * scale));
+      playbackTimers.current.push(setTimeout(() => startPlaybackVoice(item.note, item.id), (item.at - startAt) * scale));
       playbackTimers.current.push(
-        setTimeout(() => endNote(item.note, item.id), (item.at + noteLengths[index] - startAt) * scale),
+        setTimeout(() => endPlaybackVoice(item.note, item.id), (item.at + noteLengths[index] + RELEASE_MS - startAt) * scale),
       );
     });
     setIsPlaying(true);

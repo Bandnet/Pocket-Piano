@@ -1,10 +1,10 @@
 import { PianoKey } from '@/components/piano-key';
 import { PlayNavigation } from '@/components/play-navigation';
+import { DEFAULT_BPM, normalizeBpm, playbackScale } from '@/constants/tempo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AudioPlayer, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
-import { useLocalSearchParams } from 'expo-router';
-import { DEFAULT_BPM, normalizeBpm, playbackScale } from '@/constants/tempo';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GestureResponderEvent, Platform, Pressable, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -19,10 +19,13 @@ const BLACK_HEIGHT = 140;
 const PIANO_HEIGHT = 220;
 const MAX_PLAYERS = 12; // Android fails to create players beyond some limit, so never exceed this
 const RECORDING_STORAGE_PREFIX = '@pocket-piano/recording/';
+const DEFAULT_RECORDED_MS = 250; // length of a note until the finger is lifted
 
 type RecordedNote = {
-  note: string; // note name like "C#4", so recordings stay compatible with the editor
+  id: string;
+  note: string; // note name like "C#4"
   at: number;
+  duration: number; // how long the key was held, in ms
 };
 
 type StoredRecording = {
@@ -79,8 +82,9 @@ export default function PlayPage() {
   const recordingStorageKey = `${RECORDING_STORAGE_PREFIX}${encodeURIComponent(projectName)}`;
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
-  const players = useRef(new Map<number, AudioPlayer>()); // sample midi -> player, least recently used first
+  const players = useRef(new Map<number, AudioPlayer>()); // one voice per pressed/scheduled note
   const touchNotes = useRef<Record<string, number>>({}); // finger id -> midi note it is on
+  const heldNotes = useRef<Record<string, string>>({}); // finger id -> id of the recorded note it is holding
   const recordingStart = useRef(0);
   const recordingNotes = useRef<RecordedNote[]>([]);
   const playbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -119,34 +123,26 @@ export default function PlayPage() {
     };
   }, [recordingStorageKey]);
 
-  useEffect(() => {
-    setAudioModeAsync({ playsInSilentMode: true }).catch(() => undefined);
+  function releaseAudioPlayers() {
+    if (playbackTimer.current) clearTimeout(playbackTimer.current);
+    playbackTimer.current = null;
+    playbackNoteTimers.current.forEach((timer) => clearTimeout(timer));
+    playbackNoteTimers.current = [];
+    players.current.forEach((player) => player.remove());
+    players.current.clear();
+    setIsPlaying(false);
+  }
 
-    const activePlayers = players.current;
-    return () => {
-      if (playbackTimer.current) clearTimeout(playbackTimer.current);
-      playbackNoteTimers.current.forEach((timer) => clearTimeout(timer));
-      activePlayers.forEach((player) => player.remove());
-      activePlayers.clear();
-    };
-  }, []);
+  // Only keep players alive while this route is focused. The editor has its own
+  // players, and inactive routes remain mounted in the navigation stack.
+  useFocusEffect(useCallback(() => {
+    setAudioModeAsync({ playsInSilentMode: true }).catch((error) => {
+      console.warn('Could not configure audio mode', error);
+    });
+    return releaseAudioPlayers;
+  }, []));
 
-  // Load the samples for the visible keys in advance (9 players for 25 keys)
-  useEffect(() => {
-    const visible = [...whites, ...blacks.map((key) => key.midi)].filter(isPlayable);
-    new Set(visible.map(sampleMidiFor)).forEach((sampleMidi) => getPlayer(sampleMidi));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [whites, blacks]);
-
-  // One player per sample. At most MAX_PLAYERS exist; the least recently used one is removed first.
-  function getPlayer(sampleMidi: number): AudioPlayer | null {
-    const existing = players.current.get(sampleMidi);
-    if (existing) {
-      players.current.delete(sampleMidi);
-      players.current.set(sampleMidi, existing); // mark as recently used
-      return existing;
-    }
-
+  function createVoice(sampleMidi: number): AudioPlayer | null {
     while (players.current.size >= MAX_PLAYERS) {
       const oldest = players.current.keys().next().value as number;
       players.current.get(oldest)?.remove();
@@ -164,27 +160,53 @@ export default function PlayPage() {
     }
   }
 
-  function playNote(midi: number) {
-    if (!isPlayable(midi)) return;
+  function playNote(midi: number): string | null {
+    if (!isPlayable(midi)) return null;
 
     const sampleMidi = sampleMidiFor(midi);
-    const player = getPlayer(sampleMidi);
-    if (!player) return;
+    const player = createVoice(sampleMidi);
+    if (!player) return null;
 
     // the same sample serves up to 3 neighbouring keys, so set the pitch for this key right before playing
     player.shouldCorrectPitch = false;
     player.setPlaybackRate(2 ** ((midi - sampleMidi) / 12));
     player.seekTo(0);
     player.play();
+    const voiceId = Date.now() + Math.random();
+    players.current.set(voiceId, player);
+    setTimeout(() => {
+      if (players.current.get(voiceId) !== player) return;
+      player.remove();
+      players.current.delete(voiceId);
+    }, 5000);
 
-    if (isRecording) {
-      const recordedNote = { note: midiToName(midi), at: Date.now() - recordingStart.current };
-      recordingNotes.current = [...recordingNotes.current, recordedNote];
-      setPlayhead(recordedNote.at);
-    }
+    if (!isRecording) return null;
+
+    const at = Date.now() - recordingStart.current;
+    const recordedNote: RecordedNote = {
+      id: `note-${at}-${recordingNotes.current.length}`,
+      note: midiToName(midi),
+      at,
+      duration: DEFAULT_RECORDED_MS,
+    };
+    recordingNotes.current = [...recordingNotes.current, recordedNote];
+    setPlayhead(at);
+    return recordedNote.id;
+  }
+    // A finger left its key: the note's length is the time it was held
+  function releaseFinger(fingerId: string | number) {
+    const noteId = heldNotes.current[fingerId];
+    if (!noteId) return;
+    delete heldNotes.current[fingerId];
+
+    const end = Date.now() - recordingStart.current;
+    recordingNotes.current = recordingNotes.current.map((item) =>
+      item.id === noteId ? { ...item, duration: Math.max(50, end - item.at) } : item,
+    );
   }
 
   function changeOctave(delta: number) {
+    Object.keys(heldNotes.current).forEach(releaseFinger);
     setOctave((current) => Math.max(MIN_OCTAVE, Math.min(MAX_OCTAVE, current + delta)));
     touchNotes.current = {};
     setPressedNotes([]);
@@ -210,9 +232,12 @@ export default function PlayPage() {
     setIsRecording(true);
   }
 
-  function stopRecording() {
+    function stopRecording() {
+    Object.keys(heldNotes.current).forEach(releaseFinger); // keys still held when you press Stop
     const notes = recordingNotes.current;
-    const duration = notes.length ? Math.max(notes[notes.length - 1].at + 500, 500) : 0;
+    const duration = notes.length
+      ? Math.max(500, ...notes.map((item) => item.at + item.duration)) + 250
+      : 0;
     const recording = { notes, duration, bpm };
 
     setIsRecording(false);
@@ -286,12 +311,13 @@ export default function PlayPage() {
     setPressedNotes(Object.values(touchNotes.current));
   }
 
-  function handleTouchStart(event: GestureResponderEvent) {
+    function handleTouchStart(event: GestureResponderEvent) {
     for (const touch of event.nativeEvent.changedTouches) {
       const midi = noteAt(touch.locationX, touch.locationY);
       if (midi !== null) {
         touchNotes.current[touch.identifier] = midi;
-        playNote(midi);
+        const recordedId = playNote(midi);
+        if (recordedId) heldNotes.current[touch.identifier] = recordedId;
       }
     }
     syncPressed();
@@ -303,9 +329,11 @@ export default function PlayPage() {
       const previous = touchNotes.current[touch.identifier];
       if (midi === (previous ?? null)) continue;
 
+      releaseFinger(touch.identifier); // the finger left the old key
       if (midi !== null) {
         touchNotes.current[touch.identifier] = midi;
-        playNote(midi); // sliding a finger onto a new key plays it
+        const recordedId = playNote(midi); // sliding a finger onto a new key plays it
+        if (recordedId) heldNotes.current[touch.identifier] = recordedId;
       } else {
         delete touchNotes.current[touch.identifier];
       }
@@ -315,6 +343,7 @@ export default function PlayPage() {
 
   function handleTouchEnd(event: GestureResponderEvent) {
     for (const touch of event.nativeEvent.changedTouches) {
+      releaseFinger(touch.identifier);
       delete touchNotes.current[touch.identifier];
     }
     syncPressed();
