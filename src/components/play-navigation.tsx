@@ -1,7 +1,8 @@
+import { TempoControl } from '@/components/tempo-control';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { Modal, Pressable, Text, View } from 'react-native';
+import { Modal, Pressable, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 type PlayNavigationProps = {
@@ -13,6 +14,8 @@ type PlayNavigationProps = {
   projectName: string;
   isEditor?: boolean;
   showRecording?: boolean;
+  bpm?: number;
+  onBpmChange?: (bpm: number) => void;
 };
 
 export function PlayNavigation({
@@ -24,8 +27,14 @@ export function PlayNavigation({
   projectName,
   isEditor = false,
   showRecording = true,
+  bpm,
+  onBpmChange,
 }: PlayNavigationProps) {
   const [isMenuVisible, setIsMenuVisible] = useState(false);
+
+  const { width: windowWidth } = useWindowDimensions();
+  // Zwei Zeilen nur auf schmalen Bildschirmen (Handy). Auf breiten passt alles in eine Zeile.
+  const twoRows = bpm !== undefined && windowWidth < 720;
 
   function closeMenu() {
     setIsMenuVisible(false);
@@ -39,18 +48,33 @@ export function PlayNavigation({
   return (
     <>
       <SafeAreaView edges={['top']} style={styles.navigation}>
-        <View style={styles.navigationContent}>
-          <Pressable
-            accessibilityLabel="Open navigation menu"
-            accessibilityRole="button"
-            onPress={() => setIsMenuVisible(true)}
-            style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
-            <Ionicons name="menu-outline" size={28} color="#1f2937" />
-          </Pressable>
-          <Text numberOfLines={1} ellipsizeMode="tail" style={styles.projectName}>
-            {projectName}
-          </Text>
-          <View pointerEvents="box-none" style={styles.actions}>
+        <View style={[styles.navigationContent, twoRows && styles.navigationContentWithTempo]}>
+          <View style={styles.topRow}>
+            <Pressable
+              accessibilityLabel="Open navigation menu"
+              accessibilityRole="button"
+              onPress={() => setIsMenuVisible(true)}
+              style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
+              <Ionicons name="menu-outline" size={28} color="#1f2937" />
+            </Pressable>
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.projectName}>
+              {projectName}
+            </Text>
+            {bpm !== undefined && onBpmChange ? (
+              <View style={styles.headerTempo}>
+                <TempoControl bpm={bpm} onChange={onBpmChange} />
+              </View>
+            ) : null}
+            <Pressable
+              accessibilityLabel={isEditor ? 'Return to play page' : 'Open edit page'}
+              accessibilityRole="button"
+              onPress={() => openRoute(isEditor ? '/playpage' : '/editpage')}
+              style={({ pressed }) => [styles.editButton, pressed && styles.pressed]}>
+              <Text style={styles.editText}>{isEditor ? 'Play' : 'Edit'}</Text>
+              <Ionicons name={isEditor ? 'arrow-back-outline' : 'arrow-forward-outline'} size={22} color="#1d4ed8" />
+            </Pressable>
+          </View>
+          <View pointerEvents="box-none" style={twoRows ? styles.actionsWithTempo : styles.actions}>
             {showRecording && onToggleRecording ? (
               <Pressable
                 accessibilityLabel={isRecording ? 'Stop recording' : 'Start recording'}
@@ -71,14 +95,6 @@ export function PlayNavigation({
               <Text style={styles.actionText}>{isPlaying ? 'Stop' : 'Play'}</Text>
             </Pressable>
           </View>
-          <Pressable
-            accessibilityLabel={isEditor ? 'Return to play page' : 'Open edit page'}
-            accessibilityRole="button"
-            onPress={() => openRoute(isEditor ? '/playpage' : '/editpage')}
-            style={({ pressed }) => [styles.editButton, pressed && styles.pressed]}>
-            <Text style={styles.editText}>{isEditor ? 'Play' : 'Edit'}</Text>
-            <Ionicons name={isEditor ? 'arrow-back-outline' : 'arrow-forward-outline'} size={22} color="#1d4ed8" />
-          </Pressable>
         </View>
       </SafeAreaView>
 
@@ -123,12 +139,21 @@ const styles = {
     backgroundColor: '#f3f4f6',
   },
   navigationContent: {
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
+    position: 'relative' as const,
     minHeight: 56,
     paddingHorizontal: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#d1d5db',
+  },
+    navigationContentWithTempo: {
+    paddingTop: 2,
+    paddingBottom: 6,
+  },
+  topRow: {
+    width: '100%' as const,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    minHeight: 48,
   },
   iconButton: {
     width: 44,
@@ -140,7 +165,7 @@ const styles = {
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     justifyContent: 'flex-end' as const,
-    width: 76,
+    width: 72,
     gap: 4,
     paddingHorizontal: 8,
     paddingVertical: 8,
@@ -153,14 +178,27 @@ const styles = {
     fontWeight: '600' as const,
     color: '#111827',
   },
-  actions: {
+  headerTempo: {
+    marginLeft: 4,
+  },
+    actions: {
     position: 'absolute' as const,
+    top: 0,
+    bottom: 0,
     left: 0,
     right: 0,
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
     gap: 6,
+  },
+  actionsWithTempo: {
+    width: '100%' as const,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: 6,
+    paddingTop: 2,
   },
   recordButton: {
     flexDirection: 'row' as const,

@@ -3,80 +3,74 @@ import { PlayNavigation } from '@/components/play-navigation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AudioPlayer, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
-import { GestureResponderEvent, Platform, useWindowDimensions, View } from 'react-native';
+import { DEFAULT_BPM, normalizeBpm, playbackScale } from '@/constants/tempo';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { GestureResponderEvent, Platform, Pressable, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const noteSounds: Record<string, { soundUrl: string; playbackRate: number }> = {};
 const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-// one real sample every 3 semitones, so a key is never more than 1 semitone away from one
-const sampledNotes = ['C4', 'D#4', 'F#4', 'A4', 'C5', 'D#5', 'F#5', 'A5', 'C6'];
-
-for (const octave of [4, 5, 6]) {
-  for (const [noteIndex, noteName] of noteNames.entries()) {
-    const note = `${noteName}${octave}`;
-    const midiNote = (octave + 1) * 12 + noteIndex;
-    const sampledNote = sampledNotes.reduce((closest, candidate) => {
-      const [candidateName, candidateOctave] = [candidate.slice(0, -1), Number(candidate.slice(-1))];
-      const candidateIndex = (candidateOctave + 1) * 12 + noteNames.indexOf(candidateName);
-      const closestIndex = (Number(closest.slice(-1)) + 1) * 12 + noteNames.indexOf(closest.slice(0, -1));
-      return Math.abs(candidateIndex - midiNote) < Math.abs(closestIndex - midiNote) ? candidate : closest;
-    }, sampledNotes[0]);
-    const [sampleName, sampleOctave] = [sampledNote.slice(0, -1), Number(sampledNote.slice(-1))];
-    const sampleIndex = (sampleOctave + 1) * 12 + noteNames.indexOf(sampleName);
-
-    noteSounds[note] = {
-      soundUrl: `https://tonejs.github.io/audio/salamander/${sampleName.replace('#', 's')}${sampleOctave}.mp3`,
-      playbackRate: 2 ** ((midiNote - sampleIndex) / 12),
-    };
-  }
-}
-
-const whiteNotes = [
-  'C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4',
-  'C5', 'D5', 'E5', 'F5', 'G5', 'A5', 'B5',
-  'C6',
-];
-const blackNotes = [
-  { note: 'C#4', afterWhiteIndex: 0 },
-  { note: 'D#4', afterWhiteIndex: 1 },
-  { note: 'F#4', afterWhiteIndex: 3 },
-  { note: 'G#4', afterWhiteIndex: 4 },
-  { note: 'A#4', afterWhiteIndex: 5 },
-  { note: 'C#5', afterWhiteIndex: 7 },
-  { note: 'D#5', afterWhiteIndex: 8 },
-  { note: 'F#5', afterWhiteIndex: 10 },
-  { note: 'G#5', afterWhiteIndex: 11 },
-  { note: 'A#5', afterWhiteIndex: 12 },
-];
+const BLACK_PITCH_CLASSES = [1, 3, 6, 8, 10];
+const LOWEST_MIDI = 21; // A0
+const HIGHEST_MIDI = 108; // C8
+const MIN_OCTAVE = 0; // window C0 to C2 (keys below A0 are dimmed and silent)
+const MAX_OCTAVE = 6; // window C6 to C8
+const DEFAULT_OCTAVE = 4; // window C4 to C6
 const BLACK_HEIGHT = 140;
 const PIANO_HEIGHT = 220;
-const POOL_SIZE = 1; // players per key. If all keys work, you can try 2 for overlapping repeats
+const MAX_PLAYERS = 12; // Android fails to create players beyond some limit, so never exceed this
 const RECORDING_STORAGE_PREFIX = '@pocket-piano/recording/';
 
 type RecordedNote = {
-  note: string;
+  note: string; // note name like "C#4", so recordings stay compatible with the editor
   at: number;
 };
 
 type StoredRecording = {
   notes: RecordedNote[];
   duration: number;
+  bpm?: number;
 };
 
-function noteAt(x: number, y: number, keyWidth: number, blackWidth: number): string | null {
-  const pianoWidth = whiteNotes.length * keyWidth;
-  if (x < 0 || x >= pianoWidth || y < 0 || y > PIANO_HEIGHT) return null;
+function midiToName(midi: number) {
+  return `${noteNames[midi % 12]}${Math.floor(midi / 12) - 1}`;
+}
 
-  if (y <= BLACK_HEIGHT) {
-    const black = blackNotes.find((key) => {
-      const left = (key.afterWhiteIndex + 1) * keyWidth - blackWidth / 2;
-      return x >= left && x <= left + blackWidth;
-    });
-    if (black) return black.note;
+function noteNameToMidi(name: string) {
+  return (Number(name.slice(-1)) + 1) * 12 + noteNames.indexOf(name.slice(0, -1));
+}
+
+function isBlackKey(midi: number) {
+  return BLACK_PITCH_CLASSES.includes(midi % 12);
+}
+
+function isPlayable(midi: number) {
+  return midi >= LOWEST_MIDI && midi <= HIGHEST_MIDI;
+}
+
+// Salamander has a real sample every 3 semitones (A0, C1, D#1, F#1, A1, ... C8)
+function sampleMidiFor(midi: number) {
+  return Math.round(midi / 3) * 3;
+}
+
+function getSampleSource(sampleMidi: number) {
+  // Remote files (works without any setup):
+  return `https://tonejs.github.io/audio/salamander/${midiToName(sampleMidi).replace('#', 's')}.mp3`;
+  // Local files (after running scripts/download-samples.js): add
+  //   import { salamanderSamples } from '@/constants/salamander-samples';
+  // at the top and use this line instead:
+  //   return salamanderSamples[sampleMidi];
+}
+
+// The keys visible for a given octave: two octaves plus the next C (15 white, 10 black)
+function buildWindow(octave: number) {
+  const start = (octave + 1) * 12;
+  const whites: number[] = [];
+  const blacks: { midi: number; afterWhiteIndex: number }[] = [];
+  for (let midi = start; midi <= start + 24; midi++) {
+    if (isBlackKey(midi)) blacks.push({ midi, afterWhiteIndex: whites.length - 1 });
+    else whites.push(midi);
   }
-
-  return whiteNotes[Math.floor(x / keyWidth)] ?? null;
+  return { whites, blacks };
 }
 
 export default function PlayPage() {
@@ -85,25 +79,27 @@ export default function PlayPage() {
   const recordingStorageKey = `${RECORDING_STORAGE_PREFIX}${encodeURIComponent(projectName)}`;
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
-  const players = useRef<Record<string, AudioPlayer[]>>({});
-  const nextPlayer = useRef<Record<string, number>>({});
-  const touchNotes = useRef<Record<string, string>>({}); // finger id -> note it is on
+  const players = useRef(new Map<number, AudioPlayer>()); // sample midi -> player, least recently used first
+  const touchNotes = useRef<Record<string, number>>({}); // finger id -> midi note it is on
   const recordingStart = useRef(0);
   const recordingNotes = useRef<RecordedNote[]>([]);
   const playbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playbackNoteTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
-  const [pressedNotes, setPressedNotes] = useState<string[]>([]);
+  const [octave, setOctave] = useState(DEFAULT_OCTAVE);
+  const [pressedNotes, setPressedNotes] = useState<number[]>([]);
   const [savedNotes, setSavedNotes] = useState<RecordedNote[]>([]);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [playhead, setPlayhead] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [timelineWidth, setTimelineWidth] = useState(0);
+  const [bpm, setBpm] = useState(DEFAULT_BPM);
 
+  const { whites, blacks } = useMemo(() => buildWindow(octave), [octave]);
   const availableWidth = Math.max(1, windowWidth - insets.left - insets.right - 16);
-  const keyWidth = Math.floor(availableWidth / whiteNotes.length);
+  const keyWidth = Math.floor(availableWidth / whites.length);
   const blackWidth = keyWidth * (2 / 3);
-  const pianoWidth = whiteNotes.length * keyWidth;
+  const pianoWidth = whites.length * keyWidth;
 
   useEffect(() => {
     let cancelled = false;
@@ -114,6 +110,7 @@ export default function PlayPage() {
         const recording = JSON.parse(stored) as StoredRecording;
         setSavedNotes(recording.notes);
         setRecordingDuration(recording.duration);
+        setBpm(normalizeBpm(recording.bpm ?? DEFAULT_BPM));
       })
       .catch(() => undefined);
 
@@ -125,44 +122,72 @@ export default function PlayPage() {
   useEffect(() => {
     setAudioModeAsync({ playsInSilentMode: true }).catch(() => undefined);
 
+    const activePlayers = players.current;
     return () => {
       if (playbackTimer.current) clearTimeout(playbackTimer.current);
       playbackNoteTimers.current.forEach((timer) => clearTimeout(timer));
-      Object.values(players.current).forEach((pool) => pool.forEach((player) => player.remove()));
-      players.current = {};
+      activePlayers.forEach((player) => player.remove());
+      activePlayers.clear();
     };
   }, []);
 
-  function playNote(note: string) {
-    let pool = players.current[note];
-    if (!pool) {
-      const { soundUrl, playbackRate } = noteSounds[note];
-      try {
-        pool = Array.from({ length: POOL_SIZE }, () => {
-          const player = createAudioPlayer(soundUrl, { downloadFirst: Platform.OS !== 'web' });
-          player.shouldCorrectPitch = false;
-          player.setPlaybackRate(playbackRate);
-          return player;
-        });
-        players.current[note] = pool;
-      } catch (error) {
-        console.warn(`Could not create player for ${note}`, error);
-        return;
-      }
+  // Load the samples for the visible keys in advance (9 players for 25 keys)
+  useEffect(() => {
+    const visible = [...whites, ...blacks.map((key) => key.midi)].filter(isPlayable);
+    new Set(visible.map(sampleMidiFor)).forEach((sampleMidi) => getPlayer(sampleMidi));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [whites, blacks]);
+
+  // One player per sample. At most MAX_PLAYERS exist; the least recently used one is removed first.
+  function getPlayer(sampleMidi: number): AudioPlayer | null {
+    const existing = players.current.get(sampleMidi);
+    if (existing) {
+      players.current.delete(sampleMidi);
+      players.current.set(sampleMidi, existing); // mark as recently used
+      return existing;
     }
 
-    const index = nextPlayer.current[note] ?? 0;
-    nextPlayer.current[note] = (index + 1) % POOL_SIZE;
+    while (players.current.size >= MAX_PLAYERS) {
+      const oldest = players.current.keys().next().value as number;
+      players.current.get(oldest)?.remove();
+      players.current.delete(oldest);
+    }
 
-    const player = pool[index];
+    try {
+      const player = createAudioPlayer(getSampleSource(sampleMidi), { downloadFirst: Platform.OS !== 'web' });
+      player.shouldCorrectPitch = false;
+      players.current.set(sampleMidi, player);
+      return player;
+    } catch (error) {
+      console.warn(`Could not create player for ${midiToName(sampleMidi)} (${players.current.size} players exist)`, error);
+      return null;
+    }
+  }
+
+  function playNote(midi: number) {
+    if (!isPlayable(midi)) return;
+
+    const sampleMidi = sampleMidiFor(midi);
+    const player = getPlayer(sampleMidi);
+    if (!player) return;
+
+    // the same sample serves up to 3 neighbouring keys, so set the pitch for this key right before playing
+    player.shouldCorrectPitch = false;
+    player.setPlaybackRate(2 ** ((midi - sampleMidi) / 12));
     player.seekTo(0);
     player.play();
 
     if (isRecording) {
-      const recordedNote = { note, at: Date.now() - recordingStart.current };
+      const recordedNote = { note: midiToName(midi), at: Date.now() - recordingStart.current };
       recordingNotes.current = [...recordingNotes.current, recordedNote];
       setPlayhead(recordedNote.at);
     }
+  }
+
+  function changeOctave(delta: number) {
+    setOctave((current) => Math.max(MIN_OCTAVE, Math.min(MAX_OCTAVE, current + delta)));
+    touchNotes.current = {};
+    setPressedNotes([]);
   }
 
   function stopPlayback() {
@@ -188,13 +213,23 @@ export default function PlayPage() {
   function stopRecording() {
     const notes = recordingNotes.current;
     const duration = notes.length ? Math.max(notes[notes.length - 1].at + 500, 500) : 0;
-    const recording = { notes, duration };
+    const recording = { notes, duration, bpm };
 
     setIsRecording(false);
     setSavedNotes(notes);
     setRecordingDuration(duration);
     setPlayhead(0);
     AsyncStorage.setItem(recordingStorageKey, JSON.stringify(recording)).catch(() => undefined);
+  }
+
+  function changeBpm(nextBpm: number) {
+    const normalizedBpm = normalizeBpm(nextBpm);
+    if (isPlaying) stopPlayback();
+    setBpm(normalizedBpm);
+    AsyncStorage.setItem(
+      recordingStorageKey,
+      JSON.stringify({ notes: savedNotes, duration: recordingDuration, bpm: normalizedBpm }),
+    ).catch(() => undefined);
   }
 
   function playRecording() {
@@ -204,14 +239,15 @@ export default function PlayPage() {
     setIsPlaying(true);
     const startAt = playhead >= recordingDuration ? 0 : playhead;
     const startedAt = Date.now() - startAt;
+    const scale = playbackScale(bpm);
 
     savedNotes.forEach(({ note, at }) => {
       if (at < startAt) return;
-      playbackNoteTimers.current.push(setTimeout(() => playNote(note), at - startAt));
+      playbackNoteTimers.current.push(setTimeout(() => playNote(noteNameToMidi(note)), (at - startAt) * scale));
     });
 
     function updatePlayhead() {
-      const elapsed = Date.now() - startedAt;
+      const elapsed = (Date.now() - startedAt) / scale;
       if (elapsed >= recordingDuration) {
         setPlayhead(recordingDuration);
         setIsPlaying(false);
@@ -231,16 +267,31 @@ export default function PlayPage() {
     setPlayhead(nextPosition);
   }
 
+  function noteAt(x: number, y: number): number | null {
+    if (x < 0 || x >= pianoWidth || y < 0 || y > PIANO_HEIGHT) return null;
+
+    let midi: number | undefined;
+    if (y <= BLACK_HEIGHT) {
+      midi = blacks.find((key) => {
+        const left = (key.afterWhiteIndex + 1) * keyWidth - blackWidth / 2;
+        return x >= left && x <= left + blackWidth;
+      })?.midi;
+    }
+    midi ??= whites[Math.floor(x / keyWidth)];
+
+    return midi !== undefined && isPlayable(midi) ? midi : null;
+  }
+
   function syncPressed() {
     setPressedNotes(Object.values(touchNotes.current));
   }
 
   function handleTouchStart(event: GestureResponderEvent) {
     for (const touch of event.nativeEvent.changedTouches) {
-      const note = noteAt(touch.locationX, touch.locationY, keyWidth, blackWidth);
-      if (note) {
-        touchNotes.current[touch.identifier] = note;
-        playNote(note);
+      const midi = noteAt(touch.locationX, touch.locationY);
+      if (midi !== null) {
+        touchNotes.current[touch.identifier] = midi;
+        playNote(midi);
       }
     }
     syncPressed();
@@ -248,13 +299,13 @@ export default function PlayPage() {
 
   function handleTouchMove(event: GestureResponderEvent) {
     for (const touch of event.nativeEvent.changedTouches) {
-      const note = noteAt(touch.locationX, touch.locationY, keyWidth, blackWidth);
+      const midi = noteAt(touch.locationX, touch.locationY);
       const previous = touchNotes.current[touch.identifier];
-      if (note === previous) continue;
+      if (midi === (previous ?? null)) continue;
 
-      if (note) {
-        touchNotes.current[touch.identifier] = note;
-        playNote(note); // sliding a finger onto a new key plays it
+      if (midi !== null) {
+        touchNotes.current[touch.identifier] = midi;
+        playNote(midi); // sliding a finger onto a new key plays it
       } else {
         delete touchNotes.current[touch.identifier];
       }
@@ -278,6 +329,8 @@ export default function PlayPage() {
         hasRecording={savedNotes.length > 0}
         onToggleRecording={isRecording ? stopRecording : startRecording}
         onTogglePlayback={isPlaying ? stopPlayback : playRecording}
+        bpm={bpm}
+        onBpmChange={changeBpm}
       />
       <SafeAreaView edges={['left', 'right', 'bottom']} style={styles.content}>
         <View
@@ -288,6 +341,25 @@ export default function PlayPage() {
           <View style={[styles.timelineProgress, { width: `${recordingDuration ? (playhead / recordingDuration) * 100 : 0}%` }]} />
           <View style={[styles.playhead, { left: `${recordingDuration ? (playhead / recordingDuration) * 100 : 0}%` }]} />
         </View>
+        <View style={styles.octaveBar}>
+          <Pressable
+            accessibilityLabel="Octave down"
+            disabled={octave <= MIN_OCTAVE}
+            onPress={() => changeOctave(-1)}
+            style={[styles.octaveButton, octave <= MIN_OCTAVE && styles.octaveButtonDisabled]}>
+            <Text style={styles.octaveButtonText}>◀ Octave</Text>
+          </Pressable>
+          <Text style={styles.octaveLabel}>
+            {midiToName(whites[0])} – {midiToName(whites[whites.length - 1])}
+          </Text>
+          <Pressable
+            accessibilityLabel="Octave up"
+            disabled={octave >= MAX_OCTAVE}
+            onPress={() => changeOctave(1)}
+            style={[styles.octaveButton, octave >= MAX_OCTAVE && styles.octaveButtonDisabled]}>
+            <Text style={styles.octaveButtonText}>Octave ▶</Text>
+          </Pressable>
+        </View>
         <View
           style={[styles.piano, { width: pianoWidth }]}
           onTouchStart={handleTouchStart}
@@ -295,27 +367,28 @@ export default function PlayPage() {
           onTouchEnd={handleTouchEnd}
           onTouchCancel={handleTouchEnd}>
           <View style={styles.whiteKeys} pointerEvents="none">
-            {whiteNotes.map((note) => (
+            {whites.map((midi) => (
               <PianoKey
-                key={note}
+                key={midi}
                 isBlack={false}
-                note={note}
-                pressed={pressedNotes.includes(note)}
-                style={{ width: keyWidth }}
+                note={midiToName(midi)}
+                pressed={pressedNotes.includes(midi)}
+                style={{ width: keyWidth, opacity: isPlayable(midi) ? 1 : 0.3 }}
               />
             ))}
           </View>
           <View style={styles.blackKeys} pointerEvents="none">
-            {blackNotes.map((key) => (
+            {blacks.map((key) => (
               <PianoKey
-                key={key.note}
+                key={key.midi}
                 isBlack
-                note={key.note}
-                pressed={pressedNotes.includes(key.note)}
+                note={midiToName(key.midi)}
+                pressed={pressedNotes.includes(key.midi)}
                 style={{
                   position: 'absolute',
                   left: (key.afterWhiteIndex + 1) * keyWidth - blackWidth / 2,
                   width: blackWidth,
+                  opacity: isPlayable(key.midi) ? 1 : 0.3,
                 }}
               />
             ))}
@@ -364,6 +437,30 @@ const styles = {
     width: 3,
     marginLeft: -1.5,
     backgroundColor: '#1d4ed8',
+  },
+  octaveBar: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 16,
+    marginBottom: 20,
+  },
+  octaveButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 6,
+    backgroundColor: '#dbeafe',
+  },
+  octaveButtonDisabled: {
+    opacity: 0.4,
+  },
+  octaveButtonText: {
+    color: '#1d4ed8',
+    fontWeight: '600' as const,
+  },
+  octaveLabel: {
+    minWidth: 90,
+    textAlign: 'center' as const,
+    fontWeight: '600' as const,
   },
   piano: {
     position: 'relative' as const,

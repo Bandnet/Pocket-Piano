@@ -1,26 +1,57 @@
 import { PlayNavigation } from '@/components/play-navigation';
+import { TempoControl } from '@/components/tempo-control';
+import { DEFAULT_BPM, normalizeBpm, playbackScale } from '@/constants/tempo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AudioPlayer, createAudioPlayer } from 'expo-audio';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Modal, PanResponder, Platform, Pressable, ScrollView, Text, useWindowDimensions, View } from 'react-native';
+import {
+  Modal,
+  PanResponder,
+  PanResponderInstance,
+  Platform,
+  Pressable,
+  ScrollView,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 
 const RECORDING_STORAGE_PREFIX = '@pocket-piano/recording/';
 const ROW_HEIGHT = 22; // row height at 100% zoom
 const KEYBOARD_WIDTH = 76;
 const PX_PER_SECOND = 120; // timeline scale at 100% zoom
-const DEFAULT_NOTE_MS = 250; // recordings only store the start time, so notes get this length
+const DEFAULT_NOTE_MS = 250; // length of newly added notes
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 1.25;
 const SNAP_MS = 50;
 const GRID_MS = 250;
+const LOWEST_MIDI = 21; // A0
+const HIGHEST_MIDI = 108; // C8
+const MAX_PLAYERS = 12; // keep the same value as on the play page (Android limits how many players can exist)
 const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const sampledNotes = ['C4', 'D#4', 'F#4', 'A4', 'C5', 'D#5', 'F#5', 'A5', 'C6'];
-const pianoNotes = [
-  'C4', 'C#4', 'D4', 'D#4', 'E4', 'F4', 'F#4', 'G4', 'G#4', 'A4', 'A#4', 'B4',
-  'C5', 'C#5', 'D5', 'D#5', 'E5', 'F5', 'F#5', 'G5', 'G#5', 'A5', 'A#5', 'B5', 'C6',
-].reverse();
 const blackNoteNames = new Set(['C#', 'D#', 'F#', 'G#', 'A#']);
+
+function midiToName(midi: number) {
+  return `${noteNames[midi % 12]}${Math.floor(midi / 12) - 1}`;
+}
+
+function noteNameToMidi(name: string) {
+  return (Number(name.slice(-1)) + 1) * 12 + noteNames.indexOf(name.slice(0, -1));
+}
+
+// all 88 piano keys, highest note first (top row of the editor)
+const pianoNotes = Array.from({ length: HIGHEST_MIDI - LOWEST_MIDI + 1 }, (_, index) => midiToName(HIGHEST_MIDI - index));
+const rowByNote = new Map(pianoNotes.map((note, row) => [note, row]));
+
+// Salamander has a real sample every 3 semitones (A0, C1, D#1, F#1, A1, ... C8)
+function sampleMidiFor(midi: number) {
+  return Math.round(midi / 3) * 3;
+}
+
+function getSampleUrl(sampleMidi: number) {
+  return `https://tonejs.github.io/audio/salamander/${midiToName(sampleMidi).replace('#', 's')}.mp3`;
+}
 
 type RecordedNote = {
   id: string;
@@ -32,6 +63,7 @@ type RecordedNote = {
 type StoredRecording = {
   notes: RecordedNote[];
   duration: number;
+  bpm?: number;
 };
 
 type EditorWorkspaceProps = {
@@ -42,27 +74,17 @@ function clampZoom(value: number) {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value));
 }
 
-function getSound(note: string) {
-  const noteName = note.slice(0, -1);
-  const octave = Number(note.slice(-1));
-  const midiNote = (octave + 1) * 12 + noteNames.indexOf(noteName);
-  const sampledNote = sampledNotes.reduce((closest, candidate) => {
-    const candidateName = candidate.slice(0, -1);
-    const candidateOctave = Number(candidate.slice(-1));
-    const candidateMidi = (candidateOctave + 1) * 12 + noteNames.indexOf(candidateName);
-    const closestName = closest.slice(0, -1);
-    const closestOctave = Number(closest.slice(-1));
-    const closestMidi = (closestOctave + 1) * 12 + noteNames.indexOf(closestName);
-    return Math.abs(candidateMidi - midiNote) < Math.abs(closestMidi - midiNote) ? candidate : closest;
-  }, sampledNotes[0]);
-  const sampleName = sampledNote.slice(0, -1);
-  const sampleOctave = sampledNote.slice(-1);
-  const sampleMidi = (Number(sampleOctave) + 1) * 12 + noteNames.indexOf(sampleName);
+function snapTime(value: number) {
+  return Math.round(value / SNAP_MS) * SNAP_MS;
+}
 
-  return {
-    soundUrl: `https://tonejs.github.io/audio/salamander/${sampleName.replace('#', 's')}${sampleOctave}.mp3`,
-    playbackRate: 2 ** ((midiNote - sampleMidi) / 12),
-  };
+// Time until the next note of the same pitch starts (a note cannot be longer than that)
+function gapToNextSamePitch(list: RecordedNote[], note: RecordedNote) {
+  let nextAt = Infinity;
+  for (const other of list) {
+    if (other.id !== note.id && other.note === note.note && other.at > note.at && other.at < nextAt) nextAt = other.at;
+  }
+  return nextAt - note.at;
 }
 
 export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
@@ -71,19 +93,25 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
   const [notes, setNotes] = useState<RecordedNote[]>([]);
   const [playhead, setPlayhead] = useState(0);
   const [zoom, setZoom] = useState(1);
+  const [bpm, setBpm] = useState(DEFAULT_BPM);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPinching, setIsPinching] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [addMenu, setAddMenu] = useState<{ note: string; at: number } | null>(null);
-  const players = useRef<Record<string, AudioPlayer>>({});
+  const players = useRef(new Map<number, AudioPlayer>()); // sample midi -> player, least recently used first
+  const lastPlayed = useRef<Record<number, string>>({}); // sample midi -> id of the note that last started on it
   const playbackTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const playheadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pinchStart = useRef<{ distance: number; zoom: number; centerX: number } | null>(null);
   const zoomAnchor = useRef<{ contentX: number; viewportX: number; baseZoom: number } | null>(null);
   const timelineScrollRef = useRef<ScrollView>(null);
+  const verticalScrollRef = useRef<ScrollView>(null);
   const scrollOffset = useRef(0);
-  const undoStack = useRef<StoredRecording[]>([]);
+  const undoStack = useRef<{ notes: RecordedNote[]; duration: number }[]>([]);
   const notesRef = useRef<RecordedNote[]>([]);
+  const dragBefore = useRef<{ notes: RecordedNote[]; duration: number } | null>(null);
+  const responders = useRef<Record<string, { move: PanResponderInstance; resize: PanResponderInstance }>>({});
 
   const rowHeight = Math.max(2, ROW_HEIGHT * zoom);
   const pxPerMs = (PX_PER_SECOND * zoom) / 1000;
@@ -92,34 +120,38 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
   const timelineWidth = Math.max(minTimelineWidth, (duration + DEFAULT_NOTE_MS) * pxPerMs);
   const timelineHeight = pianoNotes.length * rowHeight;
 
-  // Length of each note in ms: default length, shortened if the same pitch is played again sooner
-  const noteLengths = useMemo(() => {
-    return notes.map((item) => {
-      let nextAt = Infinity;
-      for (const other of notes) {
-        if (other.note === item.note && other.at > item.at && other.at < nextAt) nextAt = other.at;
-      }
-      return Math.min(item.duration, nextAt - item.at);
-    });
-  }, [notes]);
+  // The cached drag handlers below live longer than one render, so they read the newest values from here
+  const latest = useRef({ pxPerMs, rowHeight, duration, selectedNoteId });
+  latest.current = { pxPerMs, rowHeight, duration, selectedNoteId };
+  const actions = useRef({ beginEdit, updateNote, finishEdit, preview });
+  actions.current = { beginEdit, updateNote, finishEdit, preview };
+
+  // Displayed length of each note: its own length, but never longer than the gap to the same pitch
+  const noteLengths = useMemo(
+    () => notes.map((item) => Math.min(item.duration, gapToNextSamePitch(notes, item))),
+    [notes],
+  );
 
   useEffect(() => {
     let cancelled = false;
     AsyncStorage.getItem(`${RECORDING_STORAGE_PREFIX}${encodeURIComponent(projectName)}`)
       .then((stored) => {
-        if (!cancelled && stored) {
+        if (cancelled) return;
+        let loadedNotes: RecordedNote[] = [];
+        if (stored) {
           const storedRecording = JSON.parse(stored) as StoredRecording;
-          const loadedNotes = storedRecording.notes.map((note, index) => ({
+          loadedNotes = storedRecording.notes.map((note, index) => ({
             id: note.id ?? `${note.note}-${note.at}-${index}`,
             note: note.note,
             at: note.at,
             duration: note.duration ?? 500,
           }));
-          const normalizedRecording = { ...storedRecording, notes: loadedNotes };
           notesRef.current = loadedNotes;
           setNotes(loadedNotes);
-          setRecording(normalizedRecording);
+          setRecording({ ...storedRecording, notes: loadedNotes });
+          setBpm(normalizeBpm(storedRecording.bpm ?? DEFAULT_BPM));
         }
+        setTimeout(() => scrollToNotes(loadedNotes), 100);
       })
       .catch(() => undefined);
 
@@ -128,10 +160,14 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
     };
   }, [projectName]);
 
-  useEffect(() => () => {
-    if (playheadTimer.current) clearTimeout(playheadTimer.current);
-    playbackTimers.current.forEach((timer) => clearTimeout(timer));
-    Object.values(players.current).forEach((player) => player.remove());
+  useEffect(() => {
+    const activePlayers = players.current;
+    return () => {
+      if (playheadTimer.current) clearTimeout(playheadTimer.current);
+      playbackTimers.current.forEach((timer) => clearTimeout(timer));
+      activePlayers.forEach((player) => player.remove());
+      activePlayers.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -141,113 +177,95 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
     requestAnimationFrame(() => timelineScrollRef.current?.scrollTo({ x: nextOffset, animated: false }));
   }, [zoom]);
 
-  function ensurePlayer(note: string) {
-    if (!players.current[note]) {
-      const { soundUrl, playbackRate } = getSound(note);
-      const player = createAudioPlayer(soundUrl, { downloadFirst: Platform.OS !== 'web' });
-      player.shouldCorrectPitch = false;
-      player.setPlaybackRate(playbackRate);
-      players.current[note] = player;
+  // Scroll the grid up/down so the recorded notes (or the C6 area when empty) are visible
+  function scrollToNotes(list: RecordedNote[]) {
+    const topRow = list.length
+      ? list.reduce((min, item) => Math.min(min, rowByNote.get(item.note) ?? min), pianoNotes.length)
+      : rowByNote.get('C6') ?? 0;
+    verticalScrollRef.current?.scrollTo({ y: Math.max(0, (topRow - 2) * ROW_HEIGHT), animated: false });
+  }
+
+  // ---------- audio: one player per sample, at most MAX_PLAYERS ----------
+
+  function getPlayer(sampleMidi: number): AudioPlayer | null {
+    const existing = players.current.get(sampleMidi);
+    if (existing) {
+      players.current.delete(sampleMidi);
+      players.current.set(sampleMidi, existing); // mark as recently used
+      return existing;
     }
-    return players.current[note];
+
+    while (players.current.size >= MAX_PLAYERS) {
+      const oldest = players.current.keys().next().value as number;
+      players.current.get(oldest)?.remove();
+      players.current.delete(oldest);
+    }
+
+    try {
+      const player = createAudioPlayer(getSampleUrl(sampleMidi), { downloadFirst: Platform.OS !== 'web' });
+      player.shouldCorrectPitch = false;
+      players.current.set(sampleMidi, player);
+      return player;
+    } catch (error) {
+      console.warn(`Could not create player for ${midiToName(sampleMidi)} (${players.current.size} players exist)`, error);
+      return null;
+    }
+  }
+
+  function startNote(noteName: string, id: string) {
+    const midi = noteNameToMidi(noteName);
+    if (Number.isNaN(midi)) return;
+    const sampleMidi = sampleMidiFor(midi);
+    const player = getPlayer(sampleMidi);
+    if (!player) return;
+
+    player.shouldCorrectPitch = false;
+    player.setPlaybackRate(2 ** ((midi - sampleMidi) / 12));
+    player.seekTo(0);
+    player.play();
+    lastPlayed.current[sampleMidi] = id;
+  }
+
+  // Ends a note after its length, unless another note has taken over the same player in the meantime
+  function endNote(noteName: string, id: string) {
+    const sampleMidi = sampleMidiFor(noteNameToMidi(noteName));
+    if (lastPlayed.current[sampleMidi] === id) players.current.get(sampleMidi)?.pause();
+  }
+
+  function preview(noteName: string) {
+    startNote(noteName, 'preview');
   }
 
   function stopPlayback() {
     if (playheadTimer.current) clearTimeout(playheadTimer.current);
     playbackTimers.current.forEach((timer) => clearTimeout(timer));
     playbackTimers.current = [];
-    Object.values(players.current).forEach((player) => player.pause());
+    players.current.forEach((player) => player.pause());
     setIsPlaying(false);
-  }
-
-  function saveNotes(nextNotes: RecordedNote[], nextDuration = duration, addToUndo = true) {
-    const nextRecording = { notes: nextNotes, duration: nextDuration };
-    if (addToUndo && notesRef.current.length >= 0) {
-      undoStack.current = [...undoStack.current, { notes: notesRef.current, duration }];
-    }
-    notesRef.current = nextNotes;
-    setNotes(nextNotes);
-    setRecording(nextRecording);
-    AsyncStorage.setItem(
-      `${RECORDING_STORAGE_PREFIX}${encodeURIComponent(projectName)}`,
-      JSON.stringify(nextRecording),
-    ).catch(() => undefined);
-  }
-
-  function undoLastEdit() {
-    const previous = undoStack.current.pop();
-    if (!previous) return;
-    saveNotes(previous.notes, previous.duration, false);
-    setSelectedNoteId(null);
-  }
-
-  function addNoteAt(x: number, y: number) {
-    const at = snapTime(Math.max(0, (x / timelineWidth) * Math.max(duration, 1000)));
-    const row = Math.max(0, Math.min(pianoNotes.length - 1, Math.floor(y / rowHeight)));
-    const nextNote = {
-      id: `note-${Date.now()}`,
-      note: pianoNotes[row],
-      at,
-      duration: 500,
-    };
-    const nextNotes = [...notesRef.current, nextNote].sort((first, second) => first.at - second.at);
-    saveNotes(nextNotes, Math.max(duration, at + nextNote.duration));
-    setSelectedNoteId(nextNote.id);
-  }
-
-  function snapTime(value: number) {
-    return Math.round(value / SNAP_MS) * SNAP_MS;
-  }
-
-  function addNoteFromMenu() {
-    if (!addMenu) return;
-    const nextNote = {
-      id: `note-${Date.now()}`,
-      note: addMenu.note,
-      at: addMenu.at,
-      duration: DEFAULT_NOTE_MS,
-    };
-    const nextNotes = [...notesRef.current, nextNote].sort((first, second) => first.at - second.at);
-    saveNotes(nextNotes, Math.max(duration, nextNote.at + nextNote.duration));
-    setSelectedNoteId(nextNote.id);
-    setAddMenu(null);
-  }
-
-  function updateNote(noteId: string, changes: Partial<RecordedNote>) {
-    const nextNotes = notesRef.current.map((note) => note.id === noteId ? { ...note, ...changes } : note);
-    notesRef.current = nextNotes;
-    setNotes(nextNotes);
-  }
-
-  function finishNoteEdit() {
-    saveNotes(notesRef.current, Math.max(duration, ...notesRef.current.map((note) => note.at + note.duration)));
-  }
-
-  function deleteSelectedNote() {
-    if (!selectedNoteId) return;
-    saveNotes(notesRef.current.filter((note) => note.id !== selectedNoteId));
-    setSelectedNoteId(null);
   }
 
   function playRecording() {
     if (!notes.length || !duration) return;
     stopPlayback();
     const startAt = playhead >= duration ? 0 : playhead;
-    const startedAt = Date.now() - startAt;
-    notes.forEach(({ note, at }) => {
-      ensurePlayer(note);
-      if (at >= startAt) {
-        playbackTimers.current.push(setTimeout(() => {
-          const player = ensurePlayer(note);
-          player.seekTo(0);
-          player.play();
-        }, at - startAt));
-      }
+    const scale = playbackScale(bpm);
+    const startedAt = Date.now() - startAt * scale;
+
+    // load the samples in advance (as many as the player limit allows, the rest load when needed)
+    const samples = new Set(notes.filter((item) => item.at >= startAt).map((item) => sampleMidiFor(noteNameToMidi(item.note))));
+    [...samples].slice(0, MAX_PLAYERS).forEach(getPlayer);
+
+    notes.forEach((item, index) => {
+      if (item.at < startAt) return;
+      playbackTimers.current.push(setTimeout(() => startNote(item.note, item.id), (item.at - startAt) * scale));
+      playbackTimers.current.push(
+        setTimeout(() => endNote(item.note, item.id), (item.at + noteLengths[index] - startAt) * scale),
+      );
     });
     setIsPlaying(true);
 
     function updatePlayhead() {
-      const elapsed = Date.now() - startedAt;
+      const elapsed = (Date.now() - startedAt) / scale;
       if (elapsed >= duration) {
         setPlayhead(duration);
         setIsPlaying(false);
@@ -259,6 +277,160 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
 
     updatePlayhead();
   }
+
+  // ---------- saving and editing ----------
+
+  function persist(nextNotes: RecordedNote[], nextDuration: number, nextBpm = bpm) {
+    const nextRecording = { notes: nextNotes, duration: nextDuration, bpm: nextBpm };
+    notesRef.current = nextNotes;
+    setNotes(nextNotes);
+    setRecording(nextRecording);
+    AsyncStorage.setItem(
+      `${RECORDING_STORAGE_PREFIX}${encodeURIComponent(projectName)}`,
+      JSON.stringify(nextRecording),
+    ).catch(() => undefined);
+  }
+
+  // Save an edit and remember how things looked before it, so Undo can restore that
+  function commitEdit(
+    nextNotes: RecordedNote[],
+    nextDuration = latest.current.duration,
+    before = { notes: notesRef.current, duration: latest.current.duration },
+  ) {
+    undoStack.current = [...undoStack.current, before];
+    persist(nextNotes, nextDuration);
+  }
+
+  function changeBpm(nextBpm: number) {
+    const normalizedBpm = normalizeBpm(nextBpm);
+    if (isPlaying) stopPlayback();
+    setBpm(normalizedBpm);
+    persist(notesRef.current, duration, normalizedBpm);
+  }
+
+  function undoLastEdit() {
+    const previous = undoStack.current.pop();
+    if (!previous) return;
+    persist(previous.notes, previous.duration);
+    setSelectedNoteId(null);
+  }
+
+  function addNoteFromMenu() {
+    if (!addMenu) return;
+    const nextNote = {
+      id: `note-${Date.now()}`,
+      note: addMenu.note,
+      at: addMenu.at,
+      duration: DEFAULT_NOTE_MS,
+    };
+    const nextNotes = [...notesRef.current, nextNote].sort((first, second) => first.at - second.at);
+    commitEdit(nextNotes, Math.max(duration, nextNote.at + nextNote.duration));
+    setSelectedNoteId(nextNote.id);
+    setAddMenu(null);
+  }
+
+  function deleteSelectedNote() {
+    if (!selectedNoteId) return;
+    commitEdit(notesRef.current.filter((item) => item.id !== selectedNoteId));
+    setSelectedNoteId(null);
+  }
+
+  // A drag or resize starts: remember the state before it and lock scrolling
+  function beginEdit(noteId: string) {
+    dragBefore.current = { notes: notesRef.current, duration: latest.current.duration };
+    setSelectedNoteId(noteId);
+    setIsDragging(true);
+  }
+
+  // During a drag: change the note on screen only (saved when the finger is lifted)
+  function updateNote(noteId: string, changes: Partial<RecordedNote>) {
+    const nextNotes = notesRef.current.map((item) => (item.id === noteId ? { ...item, ...changes } : item));
+    notesRef.current = nextNotes;
+    setNotes(nextNotes);
+  }
+
+  function finishEdit() {
+    const before = dragBefore.current;
+    dragBefore.current = null;
+    setIsDragging(false);
+    if (!before || notesRef.current === before.notes) return; // nothing changed (just a tap)
+    const nextDuration = Math.max(before.duration, ...notesRef.current.map((item) => item.at + item.duration));
+    commitEdit(notesRef.current, nextDuration, before);
+  }
+
+  // ---------- drag and resize gestures (created once per note) ----------
+
+  function createMoveResponder(noteId: string): PanResponderInstance {
+    let startAt = 0;
+    let startRow = 0;
+    let wasSelected = false;
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => {
+        const item = notesRef.current.find((entry) => entry.id === noteId);
+        if (!item) return;
+        startAt = item.at;
+        startRow = rowByNote.get(item.note) ?? 0;
+        wasSelected = latest.current.selectedNoteId === noteId;
+        actions.current.beginEdit(noteId);
+        actions.current.preview(item.note);
+      },
+      onPanResponderMove: (_event, gesture) => {
+        if (gesture.numberActiveTouches > 1) return;
+        const item = notesRef.current.find((entry) => entry.id === noteId);
+        if (!item) return;
+        const { pxPerMs: scale, rowHeight: height } = latest.current;
+        const row = Math.max(0, Math.min(pianoNotes.length - 1, startRow + Math.round(gesture.dy / height)));
+        const nextName = pianoNotes[row];
+        const nextAt = snapTime(Math.max(0, startAt + gesture.dx / scale));
+        if (item.at === nextAt && item.note === nextName) return;
+        if (nextName !== item.note) actions.current.preview(nextName);
+        actions.current.updateNote(noteId, { at: nextAt, note: nextName });
+      },
+      onPanResponderRelease: (_event, gesture) => {
+        const isTap = Math.abs(gesture.dx) < 5 && Math.abs(gesture.dy) < 5;
+        if (isTap && wasSelected) setSelectedNoteId(null); // tapping a selected note deselects it
+        actions.current.finishEdit();
+      },
+      onPanResponderTerminate: () => actions.current.finishEdit(),
+    });
+  }
+
+  function createResizeResponder(noteId: string): PanResponderInstance {
+    let startDuration = 0;
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => {
+        const item = notesRef.current.find((entry) => entry.id === noteId);
+        if (!item) return;
+        startDuration = item.duration;
+        actions.current.beginEdit(noteId);
+      },
+      onPanResponderMove: (_event, gesture) => {
+        if (gesture.numberActiveTouches > 1) return;
+        const item = notesRef.current.find((entry) => entry.id === noteId);
+        if (!item) return;
+        const wanted = snapTime(Math.max(SNAP_MS, startDuration + gesture.dx / latest.current.pxPerMs));
+        const nextDuration = Math.max(SNAP_MS, Math.min(wanted, gapToNextSamePitch(notesRef.current, item)));
+        if (nextDuration !== item.duration) actions.current.updateNote(noteId, { duration: nextDuration });
+      },
+      onPanResponderRelease: () => actions.current.finishEdit(),
+      onPanResponderTerminate: () => actions.current.finishEdit(),
+    });
+  }
+
+  function getResponders(noteId: string) {
+    if (!responders.current[noteId]) {
+      responders.current[noteId] = { move: createMoveResponder(noteId), resize: createResizeResponder(noteId) };
+    }
+    return responders.current[noteId];
+  }
+
+  // ---------- zoom and seeking ----------
 
   function distanceBetweenTouches(touches: readonly { pageX: number; pageY: number }[]) {
     if (touches.length < 2) return 0;
@@ -295,52 +467,13 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
     setIsPinching(false);
   }
 
-  // Tap on an empty part of the timeline: move the playhead there
+  // Tap on an empty part of the timeline: move the playhead there.
+  // locationX is already measured from the left edge of the whole timeline, so the scroll offset is not added.
   function seek(event: any) {
     if (pinchStart.current) return;
     stopPlayback();
-    const position = (event.nativeEvent.locationX + scrollOffset.current) / pxPerMs;
+    const position = event.nativeEvent.locationX / pxPerMs;
     setPlayhead(Math.max(0, Math.min(duration, position)));
-  }
-
-  function createMoveResponder(note: RecordedNote) {
-    let startAt = note.at;
-    return PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
-      onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dx) > 3 || Math.abs(gesture.dy) > 3,
-      onPanResponderGrant: () => {
-        setSelectedNoteId(note.id);
-        startAt = note.at;
-      },
-      onPanResponderMove: (_event, gesture) => {
-        updateNote(note.id, { at: snapTime(Math.max(0, startAt + gesture.dx / pxPerMs)) });
-      },
-      onPanResponderRelease: (_event, gesture) => {
-        if (Math.abs(gesture.dx) < 5 && Math.abs(gesture.dy) < 5) {
-          setSelectedNoteId((current) => current === note.id ? null : note.id);
-        } else {
-          finishNoteEdit();
-        }
-      },
-      onPanResponderTerminate: finishNoteEdit,
-    });
-  }
-
-  function createResizeResponder(note: RecordedNote) {
-    let startDuration = note.duration;
-    return PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
-      onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dx) > 3 || Math.abs(gesture.dy) > 3,
-      onPanResponderGrant: () => {
-        setSelectedNoteId(note.id);
-        startDuration = note.duration;
-      },
-      onPanResponderMove: (_event, gesture) => {
-        updateNote(note.id, { duration: snapTime(Math.max(SNAP_MS, startDuration + gesture.dx / pxPerMs)) });
-      },
-      onPanResponderRelease: finishNoteEdit,
-      onPanResponderTerminate: finishNoteEdit,
-    });
   }
 
   return (
@@ -349,7 +482,7 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
         projectName={projectName}
         isRecording={false}
         isPlaying={isPlaying}
-        hasRecording={Boolean(recording?.notes.length)}
+        hasRecording={notes.length > 0}
         onTogglePlayback={isPlaying ? stopPlayback : playRecording}
         isEditor
         showRecording={false}
@@ -358,6 +491,7 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
         <View style={styles.toolbar}>
           <Text style={styles.toolbarText}>Timeline</Text>
           <View style={styles.toolbarActions}>
+            <TempoControl bpm={bpm} onChange={changeBpm} />
             <Pressable disabled={!selectedNoteId} onPress={deleteSelectedNote} style={[styles.editButton, !selectedNoteId && styles.disabled]}>
               <Text style={styles.editButtonText}>Delete</Text>
             </Pressable>
@@ -365,13 +499,13 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
               <Text style={styles.editButtonText}>Undo</Text>
             </Pressable>
             <View style={styles.zoomControls}>
-            <Pressable accessibilityLabel="Zoom out" onPress={() => setZoom((current) => clampZoom(current / ZOOM_STEP))} style={styles.zoomButton}>
-              <Text style={styles.zoomText}>-</Text>
-            </Pressable>
-            <Text style={styles.zoomLabel}>{Math.round(zoom * 100)}%</Text>
-            <Pressable accessibilityLabel="Zoom in" onPress={() => setZoom((current) => clampZoom(current * ZOOM_STEP))} style={styles.zoomButton}>
-              <Text style={styles.zoomText}>+</Text>
-            </Pressable>
+              <Pressable accessibilityLabel="Zoom out" onPress={() => setZoom((current) => clampZoom(current / ZOOM_STEP))} style={styles.zoomButton}>
+                <Text style={styles.zoomText}>-</Text>
+              </Pressable>
+              <Text style={styles.zoomLabel}>{Math.round(zoom * 100)}%</Text>
+              <Pressable accessibilityLabel="Zoom in" onPress={() => setZoom((current) => clampZoom(current * ZOOM_STEP))} style={styles.zoomButton}>
+                <Text style={styles.zoomText}>+</Text>
+              </Pressable>
             </View>
           </View>
         </View>
@@ -382,7 +516,11 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
           onTouchEnd={handleTouchEnd}
           onTouchCancel={handleTouchEnd}>
           {/* vertical scroll: piano column and timeline scroll up/down together */}
-          <ScrollView scrollEnabled={!isPinching} nestedScrollEnabled showsVerticalScrollIndicator>
+          <ScrollView
+            ref={verticalScrollRef}
+            scrollEnabled={!isPinching && !isDragging}
+            nestedScrollEnabled
+            showsVerticalScrollIndicator>
             <View style={styles.editorRow}>
               <View style={styles.keyboardColumn}>
                 {pianoNotes.map((note) => {
@@ -396,24 +534,23 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
               </View>
               <View style={styles.timelineViewport}>
                 {/* horizontal scroll */}
-                  <ScrollView
-                    ref={timelineScrollRef}
+                <ScrollView
+                  ref={timelineScrollRef}
                   horizontal
-                  scrollEnabled={!isPinching}
+                  scrollEnabled={!isPinching && !isDragging}
                   nestedScrollEnabled
                   onScroll={(event) => { scrollOffset.current = event.nativeEvent.contentOffset.x; }}
                   scrollEventThrottle={16}
                   showsHorizontalScrollIndicator
                   contentContainerStyle={{ width: timelineWidth }}>
                   <View style={{ width: timelineWidth, height: timelineHeight }}>
-                    {/* background: tap to move the playhead */}
-                    <Pressable accessibilityLabel="Timeline" onPress={seek} style={styles.seekArea} />
+                    {/* rows: tap to move the playhead, long press to add a note */}
                     {pianoNotes.map((note, index) => (
                       <Pressable
                         key={note}
                         delayLongPress={350}
                         onPress={seek}
-                        onLongPress={(event) => setAddMenu({ note, at: snapTime((event.nativeEvent.locationX + scrollOffset.current) / pxPerMs) })}
+                        onLongPress={(event) => setAddMenu({ note, at: snapTime(event.nativeEvent.locationX / pxPerMs) })}
                         style={[
                           styles.timelineRow,
                           { top: index * rowHeight, height: rowHeight },
@@ -425,28 +562,27 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
                       <View key={`grid-${index}`} pointerEvents="none" style={[styles.gridLine, { left: index * GRID_MS * pxPerMs }]} />
                     ))}
                     {notes.map((item, index) => {
-                      const row = pianoNotes.indexOf(item.note);
-                      if (row < 0) return null;
+                      const row = rowByNote.get(item.note);
+                      if (row === undefined) return null;
                       const width = Math.max(4, noteLengths[index] * pxPerMs);
-                      const moveResponder = createMoveResponder(item);
-                      const resizeResponder = createResizeResponder(item);
+                      const handleWidth = Math.min(18, Math.max(6, width * 0.35));
+                      const { move, resize } = getResponders(item.id);
                       return (
-                        <Pressable
+                        <View
                           key={item.id}
-                          {...moveResponder.panHandlers}
+                          {...move.panHandlers}
                           accessibilityRole="button"
                           accessibilityLabel={`Note ${item.note}`}
-                          onPress={() => setSelectedNoteId((current) => current === item.id ? null : item.id)}
                           style={[
                             styles.noteBlock,
                             selectedNoteId === item.id && styles.noteBlockSelected,
                             { left: item.at * pxPerMs, top: row * rowHeight, width, height: rowHeight },
                           ]}>
-                          {rowHeight >= 12 && width >= 28 && (
+                          {rowHeight >= 12 && width >= 40 && (
                             <Text numberOfLines={1} style={styles.noteText}>{item.note}</Text>
                           )}
-                          <View {...resizeResponder.panHandlers} style={styles.resizeHandle} />
-                        </Pressable>
+                          <View {...resize.panHandlers} style={[styles.resizeHandle, { width: handleWidth }]} />
+                        </View>
                       );
                     })}
                     <View pointerEvents="none" style={[styles.playhead, { left: playhead * pxPerMs }]} />
@@ -579,13 +715,6 @@ const styles = {
     flex: 1,
     overflow: 'hidden' as const,
   },
-  seekArea: {
-    position: 'absolute' as const,
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
   timelineRow: {
     position: 'absolute' as const,
     left: 0,
@@ -621,7 +750,6 @@ const styles = {
     top: 0,
     right: 0,
     bottom: 0,
-    width: 18,
     backgroundColor: '#93c5fd',
   },
   modalBackdrop: {
