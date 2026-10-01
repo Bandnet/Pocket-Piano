@@ -1,21 +1,14 @@
-import { TopNavigation } from '@/components/top-navigation';
-import { Text, View } from 'react-native';
+import { EditorWorkspace } from '@/components/editor-workspace';
+import { useLocalSearchParams } from 'expo-router';
+import { View } from 'react-native';
 
 export default function EditPage() {
+  const { project } = useLocalSearchParams<{ project?: string }>();
+  const projectName = Array.isArray(project) ? project[0] : project || 'default';
+
   return (
     <View style={{ flex: 1 }}>
-      <TopNavigation />
-      <View style={styles.content}>
-        <Text>Edit Page</Text>
-      </View>
+      <EditorWorkspace projectName={projectName} />
     </View>
   );
 }
-
-const styles = {
-  content: {
-    flex: 1,
-    justifyContent: 'center' as const,
-    alignItems: 'center' as const,
-  },
-};

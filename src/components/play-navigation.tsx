@@ -9,8 +9,10 @@ type PlayNavigationProps = {
   isRecording: boolean;
   hasRecording: boolean;
   onTogglePlayback: () => void;
-  onToggleRecording: () => void;
+  onToggleRecording?: () => void;
   projectName: string;
+  isEditor?: boolean;
+  showRecording?: boolean;
 };
 
 export function PlayNavigation({
@@ -20,6 +22,8 @@ export function PlayNavigation({
   onTogglePlayback,
   onToggleRecording,
   projectName,
+  isEditor = false,
+  showRecording = true,
 }: PlayNavigationProps) {
   const [isMenuVisible, setIsMenuVisible] = useState(false);
 
@@ -47,14 +51,16 @@ export function PlayNavigation({
             {projectName}
           </Text>
           <View pointerEvents="box-none" style={styles.actions}>
-            <Pressable
-              accessibilityLabel={isRecording ? 'Stop recording' : 'Start recording'}
-              accessibilityRole="button"
-              onPress={onToggleRecording}
-              style={[styles.recordButton, isRecording && styles.stopButton]}>
-              <View style={[styles.recordIcon, isRecording && styles.stopIcon]} />
-              <Text style={styles.actionText}>{isRecording ? 'Stop' : 'Record'}</Text>
-            </Pressable>
+            {showRecording && onToggleRecording ? (
+              <Pressable
+                accessibilityLabel={isRecording ? 'Stop recording' : 'Start recording'}
+                accessibilityRole="button"
+                onPress={onToggleRecording}
+                style={[styles.recordButton, isRecording && styles.stopButton]}>
+                <View style={[styles.recordIcon, isRecording && styles.stopIcon]} />
+                <Text style={styles.actionText}>{isRecording ? 'Stop' : 'Record'}</Text>
+              </Pressable>
+            ) : null}
             <Pressable
               accessibilityLabel={isPlaying ? 'Stop playback' : 'Play recording'}
               accessibilityRole="button"
@@ -66,12 +72,12 @@ export function PlayNavigation({
             </Pressable>
           </View>
           <Pressable
-            accessibilityLabel="Open edit page"
+            accessibilityLabel={isEditor ? 'Return to play page' : 'Open edit page'}
             accessibilityRole="button"
-            onPress={() => openRoute('/editpage')}
+            onPress={() => openRoute(isEditor ? '/playpage' : '/editpage')}
             style={({ pressed }) => [styles.editButton, pressed && styles.pressed]}>
-            <Text style={styles.editText}>Edit</Text>
-            <Ionicons name="arrow-forward-outline" size={22} color="#1d4ed8" />
+            <Text style={styles.editText}>{isEditor ? 'Play' : 'Edit'}</Text>
+            <Ionicons name={isEditor ? 'arrow-back-outline' : 'arrow-forward-outline'} size={22} color="#1d4ed8" />
           </Pressable>
         </View>
       </SafeAreaView>
