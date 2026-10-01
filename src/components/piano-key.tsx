@@ -1,24 +1,24 @@
-import { Pressable, Text } from 'react-native';
+import { StyleProp, Text, View, ViewStyle } from 'react-native';
 
 type PianoKeyProps = {
   isBlack: boolean;
   note: string;
-  onPress?: () => void;
+  pressed?: boolean;
+  style?: StyleProp<ViewStyle>;
 };
 
-export function PianoKey({ isBlack, note, onPress }: PianoKeyProps) {
+export function PianoKey({ isBlack, note, pressed = false, style }: PianoKeyProps) {
   return (
-    <Pressable
-      accessibilityLabel={`Piano key ${note}`}
-      accessibilityRole="button"
-      onPressIn={onPress}
-      style={({ pressed }) => [
+    <View
+      pointerEvents="none"
+      style={[
         styles.key,
         isBlack ? styles.blackKey : styles.whiteKey,
+        style,
         pressed && styles.pressedKey,
       ]}>
       <Text style={isBlack ? styles.blackKeyText : styles.whiteKeyText}>{note}</Text>
-    </Pressable>
+    </View>
   );
 }
 
