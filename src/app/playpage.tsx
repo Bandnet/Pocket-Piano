@@ -1,5 +1,6 @@
 import { PianoKey } from '@/components/piano-key';
 import { PlayNavigation } from '@/components/play-navigation';
+import { midiToName, noteNameToMidi } from '@/constants/notes';
 import { DEFAULT_BPM, normalizeBpm, playbackScale } from '@/constants/tempo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AudioPlayer, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
@@ -8,7 +9,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GestureResponderEvent, Platform, Pressable, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const BLACK_PITCH_CLASSES = [1, 3, 6, 8, 10];
 const LOWEST_MIDI = 21; // A0
 const HIGHEST_MIDI = 108; // C8
@@ -33,14 +33,6 @@ type StoredRecording = {
   duration: number;
   bpm?: number;
 };
-
-function midiToName(midi: number) {
-  return `${noteNames[midi % 12]}${Math.floor(midi / 12) - 1}`;
-}
-
-function noteNameToMidi(name: string) {
-  return (Number(name.slice(-1)) + 1) * 12 + noteNames.indexOf(name.slice(0, -1));
-}
 
 function isBlackKey(midi: number) {
   return BLACK_PITCH_CLASSES.includes(midi % 12);
@@ -82,7 +74,7 @@ export default function PlayPage() {
   const recordingStorageKey = `${RECORDING_STORAGE_PREFIX}${encodeURIComponent(projectName)}`;
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
-  const players = useRef(new Map<number, AudioPlayer>()); // one voice per pressed/scheduled note
+  const players = useRef(new Map<number, AudioPlayer>()); // one cached player per sample
   const touchNotes = useRef<Record<string, number>>({}); // finger id -> midi note it is on
   const heldNotes = useRef<Record<string, string>>({}); // finger id -> id of the recorded note it is holding
   const recordingStart = useRef(0);
@@ -143,8 +135,12 @@ export default function PlayPage() {
   }, []));
 
   function createVoice(sampleMidi: number): AudioPlayer | null {
+    const existing = players.current.get(sampleMidi);
+    if (existing) return existing;
+
     while (players.current.size >= MAX_PLAYERS) {
-      const oldest = players.current.keys().next().value as number;
+      const oldest = players.current.keys().next().value as number | undefined;
+      if (!oldest) break;
       players.current.get(oldest)?.remove();
       players.current.delete(oldest);
     }
@@ -172,14 +168,6 @@ export default function PlayPage() {
     player.setPlaybackRate(2 ** ((midi - sampleMidi) / 12));
     player.seekTo(0);
     player.play();
-    const voiceId = Date.now() + Math.random();
-    players.current.set(voiceId, player);
-    setTimeout(() => {
-      if (players.current.get(voiceId) !== player) return;
-      player.remove();
-      players.current.delete(voiceId);
-    }, 5000);
-
     if (!isRecording) return null;
 
     const at = Date.now() - recordingStart.current;

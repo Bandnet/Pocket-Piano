@@ -137,6 +137,15 @@ export default function HomeScreen() {
                 <Text style={styles.buttonText}>Create</Text>
               </Pressable>
             </View>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                setIsModalVisible(false);
+                router.push('/importpage');
+              }}
+              style={styles.importButton}>
+              <Text style={styles.importButtonText}>Import an existing song</Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
@@ -277,6 +286,15 @@ const styles = {
     flexDirection: 'row' as const,
     justifyContent: 'flex-end' as const,
     marginTop: 24,
+  },
+  importButton: {
+    alignItems: 'center' as const,
+    marginTop: 12,
+    paddingVertical: 8,
+  },
+  importButtonText: {
+    color: '#1d4ed8',
+    fontWeight: '600' as const,
   },
   cancelButton: {
     paddingHorizontal: 16,

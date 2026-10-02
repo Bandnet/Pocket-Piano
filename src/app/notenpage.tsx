@@ -155,6 +155,7 @@ export default function NotenPage() {
         hasRecording={false}
         onTogglePlayback={() => undefined}
         showRecording={false}
+        showPlayback={false}
       />
 
       <View style={styles.heading}>

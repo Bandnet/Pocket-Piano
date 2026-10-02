@@ -7,7 +7,7 @@ const navigationItems = [
   { label: 'Play', route: '/playpage' },
   { label: 'Edit', route: '/editpage' },
   { label: 'Noten', route: '/notenpage' },
-  { label: 'Settings', route: '/settingspage' },
+  { label: 'Import', route: '/importpage' },
 ] as const;
 
 export function TopNavigation() {

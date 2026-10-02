@@ -2,6 +2,7 @@ import { TopNavigation } from '@/components/top-navigation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File, Paths } from 'expo-file-system';
 import * as DocumentPicker from 'expo-document-picker';
+import { useLocalSearchParams } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
@@ -76,7 +77,9 @@ function isValidSongFile(value: unknown): value is SongExport {
     ));
 }
 
-export default function SettingsPage() {
+export default function ImportPage() {
+  const { project } = useLocalSearchParams<{ project?: string }>();
+  const currentProject = Array.isArray(project) ? project[0] : project;
   const [isBusy, setIsBusy] = useState(false);
   const [projectCount, setProjectCount] = useState(0);
   const [pastedJson, setPastedJson] = useState('');
@@ -146,24 +149,57 @@ export default function SettingsPage() {
     setProjectCount(importedProjects.length);
   }
 
+  async function saveToCurrentProject(parsed: SongExport) {
+    if (!currentProject) {
+      await saveImportedSongs(parsed);
+      return;
+    }
+
+    const song = parsed.songs[0];
+    if (!song) return;
+
+    await AsyncStorage.setItem(
+      `${RECORDING_STORAGE_PREFIX}${encodeURIComponent(currentProject)}`,
+      JSON.stringify(song.recording),
+    );
+  }
+
+  function showImportComplete(count: number, importedToCurrentProject: boolean, sourceName?: string) {
+    Alert.alert(
+      'Import complete',
+      importedToCurrentProject
+        ? `"${currentProject}" was replaced with "${sourceName ?? 'the imported song'}".`
+        : `${count} song(s) imported.`,
+    );
+  }
+
   async function importSongs() {
     setIsBusy(true);
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: 'application/json',
+        // Some Android file providers (including messaging apps) report JSON
+        // files as text/plain or application/octet-stream.
+        type: '*/*',
         copyToCacheDirectory: true,
       });
       if (result.canceled) return;
 
-      const file = new File(result.assets[0].uri);
-      const parsed: unknown = JSON.parse(await file.text());
+      const selectedFile = result.assets[0];
+      if (!selectedFile) {
+        Alert.alert('Invalid file', 'No file was selected.');
+        return;
+      }
+
+      const file = new File(selectedFile.uri);
+      const fileText = (await file.text()).replace(/^\uFEFF/, '').trim();
+      const parsed: unknown = JSON.parse(fileText);
       if (!isValidSongFile(parsed)) {
         Alert.alert('Invalid file', 'This is not a valid Pocket Piano export file.');
         return;
       }
 
-      await saveImportedSongs(parsed);
-      Alert.alert('Import complete', `${parsed.songs.length} song(s) imported.`);
+      await saveToCurrentProject(parsed);
+      showImportComplete(parsed.songs.length, Boolean(currentProject), parsed.songs[0]?.projectName);
     } catch (error) {
       console.warn('Could not import songs', error);
       Alert.alert('Import failed', 'Choose a valid Pocket Piano JSON export file.');
@@ -180,9 +216,9 @@ export default function SettingsPage() {
         Alert.alert('Invalid JSON', 'Paste a valid Pocket Piano JSON export.');
         return;
       }
-      await saveImportedSongs(parsed);
+      await saveToCurrentProject(parsed);
       setPastedJson('');
-      Alert.alert('Import complete', `${parsed.songs.length} song(s) imported.`);
+      showImportComplete(parsed.songs.length, Boolean(currentProject), parsed.songs[0]?.projectName);
     } catch (error) {
       console.warn('Could not import pasted JSON', error);
       Alert.alert('Invalid JSON', 'The pasted text is not valid JSON or not a Pocket Piano export.');
@@ -202,8 +238,8 @@ export default function SettingsPage() {
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled">
           <Pressable onPress={Keyboard.dismiss} style={styles.content}>
-            <Text style={styles.title}>Settings</Text>
-            <Text style={styles.subtitle}>Manage your songs and backups.</Text>
+            <Text style={styles.title}>Import songs</Text>
+            <Text style={styles.subtitle}>Import or export your songs and backups.</Text>
             <View style={styles.card}>
               <Text style={styles.cardTitle}>Song data</Text>
               <Text style={styles.cardText}>

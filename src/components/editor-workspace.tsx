@@ -1,5 +1,6 @@
 import { PlayNavigation } from '@/components/play-navigation';
 import { TempoControl } from '@/components/tempo-control';
+import { midiToName, noteNameToMidi } from '@/constants/notes';
 import { DEFAULT_BPM, normalizeBpm, playbackScale } from '@/constants/tempo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AudioPlayer, createAudioPlayer } from 'expo-audio';
@@ -30,21 +31,18 @@ const GRID_MS = 250;
 const LOWEST_MIDI = 21; // A0
 const HIGHEST_MIDI = 108; // C8
 const MAX_PLAYERS = 12; // keep the same value as on the play page (Android limits how many players can exist)
-const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const blackNoteNames = new Set(['C#', 'D#', 'F#', 'G#', 'A#']);
-const RELEASE_MS = 5000; // the sound keeps fading for this long after the end of a note
-
-function midiToName(midi: number) {
-  return `${noteNames[midi % 12]}${Math.floor(midi / 12) - 1}`;
-}
-
-function noteNameToMidi(name: string) {
-  return (Number(name.slice(-1)) + 1) * 12 + noteNames.indexOf(name.slice(0, -1));
-}
+const blackPitchClasses = new Set([1, 3, 6, 8, 10]);
 
 // all 88 piano keys, highest note first (top row of the editor)
 const pianoNotes = Array.from({ length: HIGHEST_MIDI - LOWEST_MIDI + 1 }, (_, index) => midiToName(HIGHEST_MIDI - index));
-const rowByNote = new Map(pianoNotes.map((note, row) => [note, row]));
+const flatNames: Record<number, string> = { 1: 'Db', 3: 'Eb', 6: 'Gb', 8: 'Ab', 10: 'Bb' };
+const rowByNote = new Map<string, number>();
+pianoNotes.forEach((note, row) => {
+  const midi = noteNameToMidi(note);
+  rowByNote.set(note, row);
+  const flatName = flatNames[midi % 12];
+  if (flatName) rowByNote.set(`${flatName}${Math.floor(midi / 12) - 1}`, row);
+});
 
 // Salamander has a real sample every 3 semitones (A0, C1, D#1, F#1, A1, ... C8)
 function sampleMidiFor(midi: number) {
@@ -53,6 +51,10 @@ function sampleMidiFor(midi: number) {
 
 function getSampleUrl(sampleMidi: number) {
   return `https://tonejs.github.io/audio/salamander/${midiToName(sampleMidi).replace('#', 's')}.mp3`;
+}
+
+function isBlackNote(note: string) {
+  return blackPitchClasses.has(noteNameToMidi(note) % 12);
 }
 
 type RecordedNote = {
@@ -103,6 +105,12 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
   const [addMenu, setAddMenu] = useState<{ note: string; at: number } | null>(null);
   const players = useRef(new Map<number, AudioPlayer>()); // sample midi -> player, least recently used first
   const playbackVoices = useRef(new Map<string, AudioPlayer>());
+  const playbackVoicePool = useRef<Array<{
+    player: AudioPlayer;
+    sampleMidi: number;
+    noteId: string | null;
+    availableAt: number;
+  }>>([]);
   const lastPlayed = useRef<Record<number, string>>({}); // sample midi -> id of the note that last started on it
   const playbackTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const playheadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -170,8 +178,9 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
     playbackTimers.current = [];
     players.current.forEach((player) => player.remove());
     players.current.clear();
-    playbackVoices.current.forEach((player) => player.remove());
     playbackVoices.current.clear();
+    playbackVoicePool.current.forEach(({ player }) => player.remove());
+    playbackVoicePool.current = [];
     setIsPlaying(false);
   }
 
@@ -250,47 +259,82 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
     playbackTimers.current.forEach((timer) => clearTimeout(timer));
     playbackTimers.current = [];
     players.current.forEach((player) => player.pause());
-    playbackVoices.current.forEach((player) => player.remove());
     playbackVoices.current.clear();
+    playbackVoicePool.current.forEach(({ player }) => player.remove());
+    playbackVoicePool.current = [];
     setIsPlaying(false);
   }
 
-  function startPlaybackVoice(noteName: string, id: string) {
+  function startPlaybackVoice(noteName: string, id: string, durationMs: number) {
     const midi = noteNameToMidi(noteName);
     if (Number.isNaN(midi)) return;
     const sampleMidi = sampleMidiFor(midi);
+
+    const now = Date.now();
+    let voice = playbackVoicePool.current.find(
+      (candidate) => candidate.sampleMidi === sampleMidi && candidate.availableAt <= now,
+    );
+    if (!voice && playbackVoicePool.current.length < MAX_PLAYERS) {
+      try {
+        const player = createAudioPlayer(getSampleUrl(sampleMidi), { downloadFirst: Platform.OS !== 'web' });
+        player.shouldCorrectPitch = false;
+        voice = { player, sampleMidi, noteId: null, availableAt: 0 };
+        playbackVoicePool.current.push(voice);
+      } catch (error) {
+        console.warn(`Could not create playback voice for ${noteName}`, error);
+        return;
+      }
+    }
+    if (!voice) {
+      const sameSampleVoice = playbackVoicePool.current
+        .filter((candidate) => candidate.sampleMidi === sampleMidi)
+        .sort((first, second) => first.availableAt - second.availableAt)[0];
+      voice = sameSampleVoice ?? playbackVoicePool.current
+        .slice()
+        .sort((first, second) => first.availableAt - second.availableAt)[0];
+      if (voice.sampleMidi !== sampleMidi) {
+        voice.player.remove();
+        try {
+          const player = createAudioPlayer(getSampleUrl(sampleMidi), { downloadFirst: Platform.OS !== 'web' });
+          player.shouldCorrectPitch = false;
+          voice.player = player;
+          voice.sampleMidi = sampleMidi;
+        } catch (error) {
+          console.warn(`Could not replace playback voice for ${noteName}`, error);
+          return;
+        }
+      }
+      if (voice.noteId) playbackVoices.current.delete(voice.noteId);
+    }
+
     try {
-      const player = createAudioPlayer(getSampleUrl(sampleMidi), { downloadFirst: Platform.OS !== 'web' });
-      player.shouldCorrectPitch = false;
-      player.setPlaybackRate(2 ** ((midi - sampleMidi) / 12));
-      playbackVoices.current.set(id, player);
-      player.play();
+      voice.player.shouldCorrectPitch = false;
+      voice.player.setPlaybackRate(2 ** ((midi - sampleMidi) / 12));
+      voice.player.seekTo(0);
+      voice.player.play();
+      voice.noteId = id;
+      voice.availableAt = now + durationMs + 50;
+      playbackVoices.current.set(id, voice.player);
     } catch (error) {
       console.warn(`Could not create playback voice for ${noteName}`, error);
     }
   }
 
-  function endPlaybackVoice(_noteName: string, id: string) {
-    const player = playbackVoices.current.get(id);
-    if (!player) return;
-    player.pause();
-    player.remove();
-    playbackVoices.current.delete(id);
-  }
-
   function playRecording() {
     if (!notes.length || !duration) return;
     stopPlayback();
+    players.current.forEach((player) => player.remove());
+    players.current.clear();
     const startAt = playhead >= duration ? 0 : playhead;
     const scale = playbackScale(bpm);
     const startedAt = Date.now() - startAt * scale;
 
     notes.forEach((item, index) => {
       if (item.at < startAt) return;
-      playbackTimers.current.push(setTimeout(() => startPlaybackVoice(item.note, item.id), (item.at - startAt) * scale));
-      playbackTimers.current.push(
-        setTimeout(() => endPlaybackVoice(item.note, item.id), (item.at + noteLengths[index] + RELEASE_MS - startAt) * scale),
-      );
+      playbackTimers.current.push(setTimeout(
+        () => startPlaybackVoice(item.note, item.id, noteLengths[index] * scale),
+        (item.at - startAt) * scale,
+      ));
     });
     setIsPlaying(true);
 
@@ -554,7 +598,7 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
             <View style={styles.editorRow}>
               <View style={styles.keyboardColumn}>
                 {pianoNotes.map((note) => {
-                  const isBlack = blackNoteNames.has(note.slice(0, -1));
+                  const isBlack = isBlackNote(note);
                   return (
                     <View key={note} style={[styles.keyRow, { height: rowHeight }, isBlack ? styles.blackKey : styles.whiteKey]}>
                       {rowHeight >= 12 && <Text style={isBlack ? styles.blackKeyText : styles.whiteKeyText}>{note}</Text>}
@@ -584,7 +628,7 @@ export function EditorWorkspace({ projectName }: EditorWorkspaceProps) {
                         style={[
                           styles.timelineRow,
                           { top: index * rowHeight, height: rowHeight },
-                          blackNoteNames.has(note.slice(0, -1)) && styles.timelineRowBlack,
+                          isBlackNote(note) && styles.timelineRowBlack,
                         ]}
                       />
                     ))}

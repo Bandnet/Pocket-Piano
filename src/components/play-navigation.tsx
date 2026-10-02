@@ -14,6 +14,7 @@ type PlayNavigationProps = {
   projectName: string;
   isEditor?: boolean;
   showRecording?: boolean;
+  showPlayback?: boolean;
   bpm?: number;
   onBpmChange?: (bpm: number) => void;
 };
@@ -27,6 +28,7 @@ export function PlayNavigation({
   projectName,
   isEditor = false,
   showRecording = true,
+  showPlayback = true,
   bpm,
   onBpmChange,
 }: PlayNavigationProps) {
@@ -40,7 +42,7 @@ export function PlayNavigation({
     setIsMenuVisible(false);
   }
 
-  function openRoute(route: '/' | '/playpage' | '/editpage' | '/notenpage' | '/settingspage') {
+  function openRoute(route: '/' | '/playpage' | '/editpage' | '/notenpage' | '/importpage') {
     closeMenu();
     router.push({ pathname: route, params: { project: projectName } });
   }
@@ -85,15 +87,17 @@ export function PlayNavigation({
                 <Text style={styles.actionText}>{isRecording ? 'Stop' : 'Record'}</Text>
               </Pressable>
             ) : null}
-            <Pressable
-              accessibilityLabel={isPlaying ? 'Stop playback' : 'Play recording'}
-              accessibilityRole="button"
-              disabled={!hasRecording}
-              onPress={onTogglePlayback}
-              style={[styles.playButton, !hasRecording && styles.disabledButton]}>
-              <Ionicons name={isPlaying ? 'stop' : 'play'} size={14} color="#ffffff" />
-              <Text style={styles.actionText}>{isPlaying ? 'Stop' : 'Play'}</Text>
-            </Pressable>
+            {showPlayback ? (
+              <Pressable
+                accessibilityLabel={isPlaying ? 'Stop playback' : 'Play recording'}
+                accessibilityRole="button"
+                disabled={!hasRecording}
+                onPress={onTogglePlayback}
+                style={[styles.playButton, !hasRecording && styles.disabledButton]}>
+                <Ionicons name={isPlaying ? 'stop' : 'play'} size={14} color="#ffffff" />
+                <Text style={styles.actionText}>{isPlaying ? 'Stop' : 'Play'}</Text>
+              </Pressable>
+            ) : null}
           </View>
         </View>
       </SafeAreaView>
@@ -122,9 +126,9 @@ export function PlayNavigation({
               <Ionicons name="document-text-outline" size={20} color="#1f2937" />
               <Text style={styles.menuText}>Notes</Text>
             </Pressable>
-            <Pressable onPress={() => openRoute('/settingspage')} style={styles.menuItem}>
-              <Ionicons name="settings-outline" size={20} color="#1f2937" />
-              <Text style={styles.menuText}>Settings</Text>
+            <Pressable onPress={() => openRoute('/importpage')} style={styles.menuItem}>
+              <Ionicons name="download-outline" size={20} color="#1f2937" />
+              <Text style={styles.menuText}>Import</Text>
             </Pressable>
           </View>
         </Pressable>
